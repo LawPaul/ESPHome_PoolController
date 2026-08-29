@@ -1,0 +1,16 @@
+# Secrets: WiFi PSK, API encryption key, OTA password. Never commit.
+esphome/secrets.yaml
+
+# ESPHome build output (toolchain, objects, firmware images)
+esphome/.esphome/
+.pioenvs/
+.piolibdeps/
+
+# Runtime state snapshots and logs may contain network and device details.
+diagnostics/
+
+.venv/
+__pycache__/
+*.pyc
+
+.DS_Store

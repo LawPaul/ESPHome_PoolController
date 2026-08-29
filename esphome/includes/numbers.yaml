@@ -1,0 +1,736 @@
+
+# =====================================================================
+# Chlorine control setpoint + boost parameters. FC and CYA are imported
+# from Pool Math via Home Assistant (see the sensor block above); the FC
+# target is computed as ratio x CYA. The auto-tune runs automatically
+# whenever a new FC reading arrives.
+# =====================================================================
+number:
+  # Auto-driven actuator, not a user setpoint: the auto-tune loop
+  # (chlorine_update on each FC reading + chlorine_apply every 15 min) computes
+  # and re-asserts this %, so a manual change outside Service Mode is overridden
+  # within one apply cycle. Marked diagnostic (like "Pump Flow Setpoint") to keep
+  # it out of the primary Controls; it stays manually settable so a technician can
+  # drive it while Service Mode holds the automation (chlorine_suspended()).
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: output
+    name: "Chlorine Output"
+    id: chlorine_output
+    entity_category: diagnostic
+
+  - platform: template
+    name: "FC-CYA Target Ratio"
+    id: fc_cya_ratio
+    entity_category: config
+    # FC target = this ratio x CYA (TFP's FC/CYA relationship, linearised).
+    #
+    # 0.0875 = TFP's SALT WATER target at our CYA 80 -> 7.0 ppm, matching what
+    # Pool Math shows. Was 0.070, which gave 5.6 -- ABOVE the 4 ppm salt minimum
+    # but BELOW the 6-11 ppm target band, i.e. quietly under-chlorinated.
+    #
+    # A single ratio is enough because TFP's salt table is near-linear over the
+    # CYA 60-90 it recommends for SWG pools: 0.0875 gives 5.25 / 7.0 / 7.9 at
+    # CYA 60 / 80 / 90, in-band at every row. Do NOT reuse this ratio for a
+    # liquid-chlorine pool -- that table targets roughly half again as much FC.
+    #
+    # step 0.0025 (not 0.005) so 0.0875 is actually reachable on the grid.
+    min_value: 0.05
+    max_value: 0.10
+    step: 0.0025
+    optimistic: true
+    restore_value: true
+    initial_value: 0.0875
+    mode: box
+    icon: "mdi:target"
+
+  - platform: template
+    name: "FC Correction Horizon"
+    id: fc_tau_days
+    entity_category: config
+    # Days over which mass-balance control closes the remaining FC gap. This is
+    # your TEST INTERVAL, not a tuning gain: the commanded output stands until
+    # the next reading, so FC lands on target exactly when this matches how
+    # often you actually test. Setting it shorter asks the cell to close the gap
+    # faster than you will look, and overshoots by that same ratio.
+    min_value: 0.5
+    max_value: 7
+    step: 0.5
+    unit_of_measurement: "d"
+    optimistic: true
+    restore_value: true
+    initial_value: 2.5
+    mode: box
+    icon: "mdi:calendar-clock"
+
+  - platform: template
+    name: "Boost Output"
+    id: boost_percent
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 5
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    initial_value: 100
+    mode: box
+    icon: "mdi:flash"
+
+  - platform: template
+    name: "Boost Duration"
+    id: boost_hours
+    entity_category: config
+    min_value: 1
+    max_value: 24
+    step: 1
+    unit_of_measurement: "h"
+    optimistic: true
+    restore_value: true
+    initial_value: 24
+    mode: box
+    icon: "mdi:timer"
+
+  - platform: template
+    name: "Pump Normal Flow"
+    id: normal_flow
+    entity_category: config
+    # Target flow for normal circulation, in the pump's native GPM. Native
+    # flow mode holds this by trimming its own RPM. The command is a single
+    # byte of GPM, so the ceiling is 255 GPM. 28 GPM matches the holding
+    # baseline (low-power) for the spa/spillover/freeze paths.
+    # Floor is the pump's `min_flow` (10, experimental), NOT a recommendation:
+    # this value is also what freeze protection commands, so it must stay high
+    # enough to actually move water through the exposed plumbing.
+    min_value: 10
+    max_value: 110
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 28
+    mode: box
+    icon: "mdi:pump"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  # Manual pump flow override (diagnostic, service-only). Replaces the old
+  # Low/Medium/High RPM + Normal Flow buttons: energizes pump power and commands
+  # native flow at the requested GPM via pump_run_flow. Only actuates while
+  # Service Mode is on (manual pump control belongs to a tech with automation
+  # suspended); outside service the write is ignored. The lambda always displays
+  # the actual commanded flow (pump_desired_flow), so the slider can never show a
+  # value the controller didn't honor.
+  - platform: template
+    name: "Pump Flow Setpoint"
+    id: pump_flow_setpoint
+    entity_category: diagnostic
+    # Floor tracks the pump's `min_flow` (10, experimental) rather than the
+    # IntelliCenter's 20, so this service-gated slider is the instrument for
+    # probing what the drive does below the OCP's clamp.
+    min_value: 10
+    max_value: 110
+    step: 1
+    unit_of_measurement: "gal/min"
+    # box, not slider: this is a diagnostic instrument where you want to type an
+    # exact GPM, and a 1-step slider across 10..110 is fiddly to land precisely.
+    mode: box
+    optimistic: false
+    # State is published from the lambda below on this interval. The template
+    # number default is 60s, which made the slider feel dead: HA snapped it back
+    # to the stale value and the real one only appeared a minute later.
+    update_interval: 5s
+    icon: "mdi:pump"
+    lambda: "return id(pump_desired_flow);"
+    set_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - script.execute:
+                id: pump_run_flow
+                flow: !lambda "return x;"
+          else:
+            - logger.log: "Pump Flow Setpoint ignored: enable Service Mode to actuate"
+      # Republish straight away rather than waiting for the next poll. Runs on
+      # both branches: on the accepted path pump_run_flow has already latched
+      # pump_desired_flow (its first lambda runs synchronously, before the 3s
+      # delay), and on the ignored path this snaps the slider back immediately
+      # so it still never shows a value the controller didn't honor.
+      - lambda: "id(pump_flow_setpoint).publish_state(id(pump_desired_flow));"
+
+
+  # Manual pump SPEED override (diagnostic, service-only). The rpm counterpart
+  # of Pump Flow Setpoint above, and the only way to run below 20 GPM: the
+  # IntelliFlo3 clamps FLOW-mode setpoints to 20 GPM in its own firmware
+  # (measured 2026-07-25 -- commanded 17, drive held 20 GPM / 1489 rpm / 202 W),
+  # so the flow slider cannot go lower no matter what min_flow allows. Speed
+  # mode accepts 450-3450 rpm and pump power goes as rpm^3, so this is where the
+  # electricity actually is.
+  #
+  # Setting this puts the pump in speed mode until the next scene change
+  # re-resolves flow (pump_restore). Same service gate as the flow slider:
+  # manual pump control belongs to a tech with automation suspended.
+  - platform: template
+    name: "Pump RPM Setpoint"
+    id: pump_rpm_setpoint
+    entity_category: diagnostic
+    min_value: 450
+    max_value: 3450
+    step: 25
+    unit_of_measurement: "rpm"
+    # box, not slider: see Pump Flow Setpoint above. Note the 25 rpm step still
+    # applies to typed values -- HA rounds to the nearest step.
+    mode: box
+    optimistic: false
+    update_interval: 5s
+    icon: "mdi:speedometer"
+    # Shows what we COMMANDED, not what the pump reports (that's the Pump RPM
+    # sensor). Reads 0 whenever the pump is in flow mode.
+    lambda: "return id(pump_desired_rpm);"
+    set_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - script.execute:
+                id: pump_run_rpm
+                rpm: !lambda "return x;"
+          else:
+            - logger.log: "Pump RPM Setpoint ignored: enable Service Mode to actuate"
+      - lambda: "id(pump_rpm_setpoint).publish_state(id(pump_desired_rpm));"
+
+
+  # Everyday low-power circulation (the "Pool" base scene runs this 24/7). Set
+  # above the IntelliChlor cell's own internal flow switch so the cell keeps
+  # generating instead of dropping chlorination out. (This is the cell's
+  # hardware cutoff, not a controller interlock -- our flow gate is just boolean
+  # pump-running, see PentairHub::flow_present_().)
+  #
+  # THRESHOLD: ~15 GPM, not the ~25 previously asserted here. Observed
+  # 2026-07-25: running 20 GPM steady with `no_flow` OFF and the cell
+  # generating, which rules out 25 outright. ~15 is the widely reported figure
+  # for the IC series; it has NOT been confirmed on this cell by walking the
+  # flow down, so treat it as approximate and keep margin.
+  #
+  # Pump power ~ flow^3, so trimming flow is the single biggest lever on the
+  # pad. But the useful range is now narrow -- 20 down to ~15 -- and the
+  # margin is thin enough that a LOADING FILTER can eat it, which is exactly
+  # why anything below 20 has to be closed-loop rather than a fixed rpm.
+  - platform: template
+    name: "Holding Flow"
+    id: holding_flow
+    entity_category: config
+    # This is the holding TARGET, and below 20 it is enforced in software.
+    #
+    # The IntelliFlo3 clamps FLOW-mode setpoints to 20 GPM in its own firmware
+    # (measured 2026-07-25), so flow mode cannot reach the range where the real
+    # energy savings are -- pump power goes as roughly the cube of speed, and a
+    # sweep put 20 GPM at ~190 W against ~148 W at 15.5. Setting this under 20
+    # therefore hands the holding scene to the closed-loop rpm controller
+    # (holding_flow.h): it establishes at 20 GPM in flow mode, takes over at
+    # whatever rpm the drive settled on, then trims rpm to hold this target.
+    #
+    # Leaving it at 20 or above keeps the old behaviour exactly -- flow mode,
+    # controller idle -- so lowering it is the opt-in.
+    #
+    # Floor of 14 is not arbitrary: the salt cell's flow switch was measured to
+    # RECLOSE only at ~13.8 GPM (it opens at ~1.0, a 14:1 stiction asymmetry).
+    # A target under that could be held indefinitely with the cell dead and no
+    # alarm, since the switch would never reclose after any pump stop.
+    #
+    # Note flow mode remains the better control mode wherever it can be used --
+    # it is closed-loop inside the drive. Going below 20 rebuilds that in
+    # software, which is what the loop and the Filter Load baseline are for.
+    min_value: 14
+    max_value: 66
+    step: 0.5
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 20
+    mode: box
+    icon: "mdi:pump"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  # Holding SPEED setpoints, used instead of Holding Flow when "Holding RPM
+  # Mode" is on. Why they exist: the IntelliFlo's FLOW mode will not accept a
+  # setpoint below 20 GPM, and holding 20 GPM costs 202 W on the skimmer and
+  # 311 W on the main drain (4.8-7.5 kWh/day running 24/7). Speed mode goes down
+  # to 450 rpm, and pump power scales with rpm^3, so this is the only lever that
+  # reaches the big savings.
+  #
+  # Why TWO of them: speed mode is open-loop, so flow follows the head of the
+  # suction path in use, and the holding rotation swaps between two paths that
+  # measured very differently at the same 20 GPM:
+  #
+  #     skimmer      1481 rpm   202 W
+  #     main drain   1791 rpm   311 W      (+21% rpm, +54% W for the same flow)
+  #
+  # One shared rpm would run the drain leg ~17% leaner than the skimmer leg.
+  # See holding_rpm_for_suction() in holding_pattern.h.
+  #
+  # Sizing: on a fixed system curve flow scales ~linearly with rpm, so from each
+  # path's own 20 GPM reference the defaults below both land near 18 GPM (a 10%
+  # flow cut for ~28% less power) — a deliberately modest first step. The binding
+  # constraint is the IntelliChlor's own flow switch: too slow and the cell stops
+  # generating while the pump keeps running, so it FAILS QUIET. Tune each path
+  # downward in small steps and confirm the cell is still producing at each one.
+  # Expect real watts to beat the cube law by less than predicted: static head
+  # (spillway lift) doesn't scale with rpm and the drive draws a fixed few tens
+  # of watts on its own.
+  - platform: template
+    name: "Holding RPM (Skimmer)"
+    id: holding_rpm
+    entity_category: config
+    min_value: 450
+    max_value: 3450
+    step: 25
+    unit_of_measurement: "rpm"
+    optimistic: true
+    restore_value: true
+    initial_value: 1325
+    mode: box
+    icon: "mdi:pump"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  # Main-drain leg of the holding rotation. Higher than the skimmer setpoint on
+  # this system because the drain path has materially more head (see above).
+  - platform: template
+    name: "Holding RPM (Main Drain)"
+    id: holding_rpm_drain
+    entity_category: config
+    min_value: 450
+    max_value: 3450
+    step: 25
+    unit_of_measurement: "rpm"
+    optimistic: true
+    restore_value: true
+    initial_value: 1600
+    mode: box
+    icon: "mdi:pump"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  # Suction rotation: pull from the main drain for `minutes` at the start of
+  # every `period` hours (else skimmer) to turn over the deep end.
+  - platform: template
+    name: "Holding Drain Period"
+    id: holding_drain_period_h
+    entity_category: config
+    min_value: 1
+    max_value: 12
+    step: 1
+    unit_of_measurement: "h"
+    optimistic: true
+    restore_value: true
+    initial_value: 6
+    mode: box
+    icon: "mdi:sync"
+  - platform: template
+    name: "Holding Drain Minutes"
+    id: holding_drain_min
+    entity_category: config
+    # 0 DISABLES the idle main-drain rotation (holding_drain_now() returns false
+    # for drain_s <= 0), which is the default on purpose. The SCRUB phase already
+    # pulls from the main drain twice a day, which is when drain suction does its
+    # unique work -- capturing the fines the Polaris stirs up. Rotating during
+    # idle as well just paid the drain leg's higher head (~1791 vs ~1489 rpm for
+    # the same 20 GPM) for hours a day with no turnover benefit.
+    min_value: 0
+    max_value: 240
+    step: 5
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    mode: box
+    icon: "mdi:pipe-valve"
+
+  - platform: template
+    name: "Freeze Protection Threshold"
+    id: freeze_threshold_c
+    entity_category: config
+    # 2.2 °C ≈ 36 °F — matches Pentair IntelliCenter's fixed freeze trigger.
+    # Anti-chatter is handled by the minimum run-on (freeze_min_runtime_min),
+    # the same way IntelliCenter uses its Freeze Cycle Time, so the threshold
+    # itself can sit right at the setpoint with only a small release margin.
+    min_value: 0
+    max_value: 6
+    step: 0.1
+    unit_of_measurement: "°C"
+    optimistic: true
+    restore_value: true
+    initial_value: 2.2
+    mode: box
+    icon: "mdi:snowflake"
+
+  - platform: template
+    name: "Freeze Rotate Interval"
+    id: freeze_rotate_min
+    entity_category: config
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    mode: box
+    icon: "mdi:sync"
+
+  # Minimum run-on once freeze engages: hold protection at least this long
+  # regardless of temperature (the Pentair IntelliCenter "Freeze Cycle Time"
+  # analog). This — not the 0.x °C release margin — is the real anti-chatter
+  # guard: a brief warm gust can't drop protection mid-cold-snap. 0 disables it
+  # (falls back to pure temperature hysteresis).
+  - platform: template
+    name: "Freeze Minimum Run Time"
+    id: freeze_min_runtime_min
+    entity_category: config
+    min_value: 0
+    max_value: 240
+    step: 5
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    mode: box
+    icon: "mdi:timer-sand"
+
+  # How long the WiFi link may stay down before the pad reboots to recover.
+  # Needed because ESPHome's own `wifi: reboot_timeout:` is disabled whenever a
+  # fallback `ap:` is configured, and the API-side timeout can't tell a Home
+  # Assistant outage (must NOT reboot) from a wedged radio (must). 0 disables.
+  - platform: template
+    name: "WiFi Recovery Reboot"
+    id: wifi_recover_min
+    entity_category: config
+    min_value: 0
+    max_value: 240
+    step: 5
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    mode: box
+    icon: "mdi:wifi-refresh"
+
+  # Valve actuation delay: when a scene moves a valve, dip the pump to a low
+  # creep flow while the actuator travels (protects the gears + avoids a
+  # pressure surge), then restore the scene flow. 0 s disables the dip.
+  - platform: template
+    name: "Valve Change Delay"
+    id: valve_delay_s
+    entity_category: config
+    min_value: 0
+    max_value: 120
+    step: 5
+    unit_of_measurement: "s"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    mode: box
+    icon: "mdi:valve"
+  # Low creep flow held while the diverters travel — gentle enough to spare the
+  # actuator gears and suppress surge, but set just ABOVE the salt cell's own
+  # minimum flow-switch threshold (~15 GPM -- see Holding Flow, the ~25 that
+  # used to be quoted here was wrong) so chlorination continues uninterrupted
+  # through a scene change instead of the cell dropping out then back in.
+  # Safe only because the suction/return diverters are true 3-way
+  # valves (they bypass mid-travel and never dead-head). If any valve is a
+  # 2-way / plugged port that can fully block, lower this below the cell minimum
+  # so the cell de-energises during travel instead.
+  - platform: template
+    name: "Valve Change Flow"
+    id: valve_change_flow
+    entity_category: config
+    # Floor is the pump's `min_flow` (10). Note the comment above: dropping the
+    # creep below the cell's flow-switch threshold changes the DESIGN intent
+    # (cell rides through valve travel) rather than just trimming a number.
+    min_value: 10
+    max_value: 66
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 28
+    mode: box
+    icon: "mdi:water-percent"
+
+  # Suction-temperature settle VOLUME: after the suction source changes, the
+  # filter + pipes are still full of the previous source's water. Wait until this
+  # many gallons have flushed past the probe before trusting the reading. Settle
+  # time = gallons / live pump flow, so a slower pump waits proportionally longer
+  # (running slow to save power lengthens it automatically). Size ~2-3x the
+  # volume between the suction source and the probe (sand filter ~10-15 gal +
+  # pump/pipes). Default 40 gal ~= 90 s at 28 GPM, ~48 s at 50 GPM.
+  - platform: template
+    name: "Temp Settle Volume"
+    id: temp_settle_gal
+    entity_category: config
+    min_value: 5
+    max_value: 100
+    step: 5
+    unit_of_measurement: "gal"
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    mode: box
+    icon: "mdi:timer-sand"
+
+  # Flow used by the Spa Bubbles scene (spa plumbing + air blower).
+  # Floor is the pump's `min_flow` (10), but the scene needs enough flow to
+  # carry air through the spa jets -- the old 35 GPM floor is still the
+  # sensible working minimum here.
+  - platform: template
+    name: "Spa Bubbles Flow"
+    id: bubbles_flow
+    entity_category: config
+    min_value: 10
+    max_value: 110
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 62
+    mode: box
+    icon: "mdi:chart-bubble"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  - platform: template
+    name: "Cleaning Run Hour (AM)"
+    id: clean_hour_am
+    entity_category: config
+    min_value: 0
+    max_value: 23
+    step: 1
+    unit_of_measurement: "h"
+    optimistic: true
+    restore_value: true
+    initial_value: 7
+    mode: box
+    icon: "mdi:clock-start"
+
+  - platform: template
+    name: "Cleaning Run Hour (PM)"
+    id: clean_hour_pm
+    entity_category: config
+    min_value: 0
+    max_value: 23
+    step: 1
+    unit_of_measurement: "h"
+    optimistic: true
+    restore_value: true
+    initial_value: 17
+    mode: box
+    icon: "mdi:clock-start"
+
+  # Cleaning cycle phase durations (minutes).
+  - platform: template
+    name: "Cleaning Phase: Spa Filter"
+    id: clean_spa_min
+    entity_category: config
+    # 40 min at the 20 GPM clean_flow ~= 800 gal, i.e. ONE turnover of the ~790
+    # gal spa per run, twice a day. Sized on volume, not time: there is no
+    # measured evidence that this phase needs velocity to entrain grit, and flow
+    # costs energy as flow^2, so buying the turnover at the flow-mode floor is
+    # strictly cheaper than a shorter, faster phase. Raise for a dirtier spa.
+    min_value: 0
+    max_value: 90
+    step: 1
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    mode: box
+    icon: "mdi:hot-tub"
+
+  - platform: template
+    name: "Cleaning Phase: Spillover Refresh"
+    id: clean_spillover_min
+    entity_category: config
+    # 40 min at the 20 GPM clean_flow ~= 800 gal over the ~790 gal spa. With
+    # inflow/spill mixing (exponential), that swaps ~63% of the spa water for
+    # filtered pool water (e^-1.01) per run, ~86% across both daily runs. What
+    # this phase needs is GALLONS EXCHANGED, not a flow rate: the weir passes
+    # water at any flow, so duration and flow trade off freely (see clean_flow).
+    # Halving the flow doubles the minutes.
+    #
+    # This phase is also the spa's ONLY surface-debris path (the spa has no
+    # skimmer), so it earns its time even though the spa goes unused.
+    min_value: 0
+    max_value: 90
+    step: 1
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 40
+    mode: box
+    icon: "mdi:waterfall"
+
+  - platform: template
+    name: "Cleaning Phase: Pool Scrub"
+    id: clean_scrub_min
+    entity_category: config
+    min_value: 0
+    max_value: 60
+    step: 5
+    unit_of_measurement: "min"
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    mode: box
+    icon: "mdi:robot-vacuum"
+
+  - platform: template
+    name: "Cleaning Cycle Flow"
+    id: clean_flow
+    entity_category: config
+    # Circulation flow for the booster-OFF cleaning phases (SPA filter +
+    # SPILLOVER). The SCRUB phase uses booster_flow instead (below). Sits at 20,
+    # the flow-mode floor: for a fixed volume, pump energy scales with flow^2, so
+    # slow-and-long is far cheaper than fast-and-short AND the sand filters finer
+    # (longer dwell). 20 GPM x 40 min ~= one ~790 gal spa turnover per phase.
+    # Ceiling stays the 62 GPM filter max.
+    #
+    # NOT a sheeting constraint: a continuous sheet over the 18"-wide weir needs
+    # ~28.5 GPM (1.5 ft x ~19 GPM/ft), which is an APPEARANCE requirement of the
+    # explicit Spillover MODE. The cleaning phase only has to EXCHANGE VOLUME --
+    # water crosses the weir at any flow, sheet or dribble, and the gallons swap
+    # the same either way. What matters is gallons moved, not GPM.
+    #
+    # Real floor is the salt cell's flow switch, not the weir. (min_value 10 is
+    # the pump's min_flow, and flow mode clamps at 20 GPM regardless -- going
+    # lower needs rpm mode.)
+    min_value: 10
+    max_value: 62
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 20
+    mode: box
+    icon: "mdi:broom"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  - platform: template
+    name: "Booster Flow"
+    id: booster_flow
+    entity_category: config
+    # Main-pump flow during the SCRUB phase, when the Polaris pressure cleaner's
+    # booster pump runs. The booster taps the post-filter return line, so the
+    # main pump must keep it fed (Polaris PB4-60 draws ~16-25 GPM) without
+    # exceeding the filter's rated max (S244T = 62 GPM). 25 sits at the TOP of
+    # the booster's own draw range: enough to feed it, with nothing spent on
+    # headroom the booster cannot use. This is also the highest-flow phase of the
+    # day, and it runs on the main drain (the higher-head leg), so overshoot here
+    # is the most expensive overshoot on the pad -- energy goes as flow^3 at a
+    # fixed duration.
+    # (Floor is the pump's `min_flow` (10); the real minimum is the booster's
+    # ~16-25 GPM draw above, below which it runs starved.)
+    min_value: 10
+    max_value: 62
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 25
+    mode: box
+    icon: "mdi:robot-vacuum"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  - platform: template
+    name: "Filter Clean RPM Threshold"
+    id: filter_clean_threshold_pct
+    entity_category: config
+    # With the pump holding flow constant, a loading filter forces RPM UP.
+    # This is how much more rpm counts as dirty, as a % of the clean baseline
+    # (120% = needs 20% more rpm for the same flow). It is also the full-scale
+    # point of the "Filter Dirtiness" sensor, i.e. the rpm ratio that reads
+    # 100% there. Left on the raw-ratio scale (not "rpm rise %") so existing
+    # restored values stay valid.
+    min_value: 105
+    max_value: 160
+    step: 5
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    initial_value: 120
+    mode: box
+    icon: "mdi:air-filter"
+
+  # Fountain flow presets (GPM) used by the Fountains Low/High scenes.
+  # Floors are the pump's `min_flow` (10); fountain height is the real limit.
+  - platform: template
+    name: "Fountain Flow (Low)"
+    id: fountain_low_flow
+    entity_category: config
+    min_value: 10
+    max_value: 110
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 31
+    mode: box
+    icon: "mdi:fountain"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  - platform: template
+    name: "Fountain Flow (High)"
+    id: fountain_high_flow
+    entity_category: config
+    min_value: 10
+    max_value: 110
+    step: 1
+    unit_of_measurement: "gal/min"
+    optimistic: true
+    restore_value: true
+    initial_value: 62
+    mode: box
+    icon: "mdi:fountain"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - script.execute: apply_plumbing_now

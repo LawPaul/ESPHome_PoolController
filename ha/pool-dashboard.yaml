@@ -1,0 +1,1539 @@
+views:
+  - title: Home
+    sections:
+      - type: grid
+        cards:
+          - type: custom:mushroom-chips-card
+            chips:
+              - type: template
+                entity: sensor.pool_controller_pool_mode
+                icon: >-
+                  {% set m = states('sensor.pool_controller_pool_mode') %} {%
+                  set icons = {
+                    'Auto': 'mdi:autorenew', 'Pool': 'mdi:pool', 'Spa': 'mdi:hot-tub',
+                    'Spillover': 'mdi:waterfall', 'Spa Bubbles': 'mdi:chart-bubble',
+                    'Fountains Low': 'mdi:fountain', 'Fountains High': 'mdi:fountain',
+                    'Cleaning': 'mdi:broom', 'Freeze Protect': 'mdi:snowflake',
+                    'Service': 'mdi:account-wrench' } %}
+                  {{ icons.get(m, 'mdi:state-machine') }}
+                icon_color: >-
+                  {% set problems = [
+                    'binary_sensor.pool_controller_pump_alarm',
+                    'binary_sensor.pool_controller_no_flow',
+                    'binary_sensor.pool_controller_very_low_salt',
+                    'binary_sensor.pool_controller_pump_comms_lost',
+                    'binary_sensor.pool_controller_chlorinator_comms_lost'
+                  ] %} {% set ns = namespace(bad=false) %} {% for e in problems
+                  %}
+                    {% if is_state(e, 'on') %}{% set ns.bad = true %}{% endif %}
+                  {% endfor %} {% set colors = {
+                    'Auto': 'green', 'Pool': 'blue', 'Spa': 'orange',
+                    'Spillover': 'purple', 'Spa Bubbles': 'amber',
+                    'Fountains Low': 'cyan', 'Fountains High': 'teal',
+                    'Cleaning': 'indigo', 'Freeze Protect': 'light-blue',
+                    'Service': 'red' } %} {{ 'red' if ns.bad else
+                  colors.get(states('sensor.pool_controller_pool_mode'), 'grey')
+                  }}
+                content: '{{ states(''sensor.pool_controller_pool_mode'') }}'
+                tap_action:
+                  action: more-info
+              - type: template
+                entity: sensor.backyard_ph
+                icon: mdi:flask-outline
+                icon_color: >-
+                  {% set c = states('sensor.backyard_cya') | float(default=none)
+                  %}
+
+                  {% set c = [[c, 20] | max, 100] | min if c is not none else 60
+                  %}
+
+                  {% set fcmin = [2, (0.05 * c) | round(0, 'floor')] | max %}
+
+                  {% set fclo = [3, (0.075 * c) | round(0, 'floor')] | max %}
+
+                  {% set fchi = c / 10 + 3 %}
+
+                  {% set checks = [
+                    ('pH', 'sensor.backyard_ph', none, none, 0.2, 0.2),
+                    ('FC', 'sensor.backyard_fc', fclo, fchi, fclo - fcmin, none),
+                    ('CC', 'sensor.backyard_cc', none, none, 0, 0),
+                    ('TA', 'sensor.backyard_ta', none, none, 10, 10),
+                    ('CH', 'sensor.backyard_ch', none, none, 100, 100),
+                    ('CYA', 'sensor.backyard_cya', 60, 90, 10, 10),
+                    ('CSI', 'sensor.backyard_csi', none, none, 0.3, 0.3)
+                  ] %}
+
+                  {% set ns = namespace(worst=0) %}
+
+                  {% for name, s, olo, ohi, dblo, dbhi in checks %}
+                    {% set v = states(s) | float(default=none) %}
+                    {% set lo = olo if olo is not none else state_attr(s, 'target_min') | float(default=none) %}
+                    {% set hi = ohi if ohi is not none else state_attr(s, 'target_max') | float(default=none) %}
+                    {% if v is not none and lo is not none and hi is not none %}
+                      {% if (dblo is not none and v < lo - dblo) or (dbhi is not none and v > hi + dbhi) %}
+                        {% if ns.worst < 2 %}{% set ns.worst = 2 %}{% endif %}
+                      {% elif v < lo or v > hi %}
+                        {% if ns.worst < 1 %}{% set ns.worst = 1 %}{% endif %}
+                      {% endif %}
+                    {% endif %}
+                  {% endfor %}
+
+                  {% if ns.worst == 2 %}red{% elif ns.worst == 1 %}orange{% else
+                  %}green{% endif %}
+                content: >-
+                  {% set c = states('sensor.backyard_cya') | float(default=none)
+                  %}
+
+                  {% set c = [[c, 20] | max, 100] | min if c is not none else 60
+                  %}
+
+                  {% set fcmin = [2, (0.05 * c) | round(0, 'floor')] | max %}
+
+                  {% set fclo = [3, (0.075 * c) | round(0, 'floor')] | max %}
+
+                  {% set fchi = c / 10 + 3 %}
+
+                  {% set checks = [
+                    ('pH', 'sensor.backyard_ph', none, none, 0.2, 0.2),
+                    ('FC', 'sensor.backyard_fc', fclo, fchi, fclo - fcmin, none),
+                    ('CC', 'sensor.backyard_cc', none, none, 0, 0),
+                    ('TA', 'sensor.backyard_ta', none, none, 10, 10),
+                    ('CH', 'sensor.backyard_ch', none, none, 100, 100),
+                    ('CYA', 'sensor.backyard_cya', 60, 90, 10, 10),
+                    ('CSI', 'sensor.backyard_csi', none, none, 0.3, 0.3)
+                  ] %}
+
+                  {% set ns = namespace(bad=[], warn=[]) %}
+
+                  {% for name, s, olo, ohi, dblo, dbhi in checks %}
+                    {% set v = states(s) | float(default=none) %}
+                    {% set lo = olo if olo is not none else state_attr(s, 'target_min') | float(default=none) %}
+                    {% set hi = ohi if ohi is not none else state_attr(s, 'target_max') | float(default=none) %}
+                    {% if v is not none and lo is not none and hi is not none %}
+                      {% if (dblo is not none and v < lo - dblo) or (dbhi is not none and v > hi + dbhi) %}
+                        {% set ns.bad = ns.bad + [name] %}
+                      {% elif v < lo or v > hi %}
+                        {% set ns.warn = ns.warn + [name] %}
+                      {% endif %}
+                    {% endif %}
+                  {% endfor %}
+
+                  {% if ns.bad | length > 0 %}Danger {{ ns.bad | join(', ') }}
+
+                  {% elif ns.warn | length > 0 %}Watch {{ ns.warn | join(', ')
+                  }}
+
+                  {% else %}Balanced{% endif %}
+                tap_action:
+                  action: none
+              - type: template
+                entity: sensor.backyard_ph
+                icon: mdi:test-tube
+                icon_color: >-
+                  {% set tests = [
+                    ('sensor.backyard_ph', 1),
+                    ('sensor.backyard_fc', 1),
+                    ('sensor.backyard_cc', 7),
+                    ('sensor.backyard_ta', 7),
+                    ('sensor.backyard_ch', 30),
+                    ('sensor.backyard_cya', 30)
+                  ] %} {% set ns = namespace(worst=0) %} {% for s, interval in
+                  tests %}
+                    {% set ts = state_attr(s, 'last_updated') %}
+                    {% if ts %}
+                      {% set age_d = (as_timestamp(now()) - as_timestamp(ts)) / 86400 %}
+                      {% if age_d > interval * 2 %}
+                        {% if ns.worst < 2 %}{% set ns.worst = 2 %}{% endif %}
+                      {% elif age_d > interval %}
+                        {% if ns.worst < 1 %}{% set ns.worst = 1 %}{% endif %}
+                      {% endif %}
+                    {% else %}
+                      {% if ns.worst < 2 %}{% set ns.worst = 2 %}{% endif %}
+                    {% endif %}
+                  {% endfor %} {% if ns.worst == 2 %}red{% elif ns.worst == 1
+                  %}orange{% else %}green{% endif %}
+                content: >-
+                  {% set tests = [
+                    ('sensor.backyard_ph', 'pH', 1),
+                    ('sensor.backyard_fc', 'FC', 1),
+                    ('sensor.backyard_cc', 'CC', 7),
+                    ('sensor.backyard_ta', 'TA', 7),
+                    ('sensor.backyard_ch', 'CH', 30),
+                    ('sensor.backyard_cya', 'CYA', 30)
+                  ] %} {% set ns = namespace(overdue=[], due=[]) %} {% for s,
+                  name, interval in tests %}
+                    {% set ts = state_attr(s, 'last_updated') %}
+                    {% if ts %}
+                      {% set age_d = (as_timestamp(now()) - as_timestamp(ts)) / 86400 %}
+                      {% if age_d > interval * 2 %}
+                        {% set ns.overdue = ns.overdue + [name] %}
+                      {% elif age_d > interval %}
+                        {% set ns.due = ns.due + [name] %}
+                      {% endif %}
+                    {% else %}
+                      {% set ns.overdue = ns.overdue + [name] %}
+                    {% endif %}
+                  {% endfor %} {% if ns.overdue | length > 0 and ns.due | length
+                  > 0 %}Test {{ ns.overdue | join(', ') }} · Due {{ ns.due |
+                  join(', ') }} {% elif ns.overdue | length > 0 %}Test {{
+                  ns.overdue | join(', ') }} {% elif ns.due | length > 0 %}Due
+                  {{ ns.due | join(', ') }} {% else %}Tests current{% endif %}
+                tap_action:
+                  action: none
+              - type: template
+                entity: sensor.pool_controller_outdoor_temperature
+                icon: mdi:thermometer
+                icon_color: >-
+                  {% set t =
+                  states('sensor.pool_controller_outdoor_temperature') |
+                  float(default=none) %}
+
+                  {% if t is none %}disabled
+
+                  {% elif t < 60 %}blue
+
+                  {% elif t <= 85 %}green
+
+                  {% elif t <= 95 %}orange
+
+                  {% else %}red{% endif %}
+                content: >-
+                  {% set t =
+                  states('sensor.pool_controller_outdoor_temperature') |
+                  float(default=none) %} Air {{ (t | round(0) | int) ~ '°F' if t
+                  is not none else '—' }}
+                tap_action:
+                  action: none
+              - type: template
+                entity: sensor.pool_controller_surface_water_temperature
+                icon: mdi:pool
+                icon_color: >-
+                  {% set t =
+                  states('sensor.pool_controller_surface_water_temperature') |
+                  float(default=none) %}
+
+                  {% if t is none %}disabled
+
+                  {% elif t < 78 %}blue
+
+                  {% elif t < 82 %}orange
+
+                  {% elif t <= 86 %}green
+
+                  {% elif t <= 90 %}orange
+
+                  {% else %}red{% endif %}
+                content: >-
+                  {% set t =
+                  states('sensor.pool_controller_surface_water_temperature') |
+                  float(default=none) %} Surface {{ (t | round(0) | int) ~ '°F'
+                  if t is not none else '—' }}
+                tap_action:
+                  action: none
+              - type: template
+                entity: sensor.home_lightning_distance
+                icon: mdi:lightning-bolt
+                icon_color: >-
+                  {% set dist = states('sensor.home_lightning_distance') |
+                  float(default=999) %}
+
+                  {% set count = states('sensor.home_lightning_counter') |
+                  int(default=0) %}
+
+                  {% if count > 0 and dist < 6 %}
+                    {% set elapsed = (as_timestamp(now()) - as_timestamp(states.sensor.home_lightning_distance.last_changed)) / 60 %}
+                    {% if elapsed < 30 %}red{% else %}green{% endif %}
+                  {% else %}green{% endif %}
+                content: >-
+                  {% set dist = states('sensor.home_lightning_distance') |
+                  float(default=999) %}
+
+                  {% set count = states('sensor.home_lightning_counter') |
+                  int(default=0) %}
+
+                  {% if count > 0 and dist < 6 %}
+                    {% set elapsed = (as_timestamp(now()) - as_timestamp(states.sensor.home_lightning_distance.last_changed)) / 60 %}
+                    {% set remaining = (30 - elapsed) | round(0) | int %}
+                    {% if remaining > 0 %}Unsafe {{ remaining }}m{% else %}Clear{% endif %}
+                  {% else %}Clear{% endif %}
+                tap_action:
+                  action: none
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Auto
+                icon: mdi:autorenew
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if states('sensor.pool_controller_pool_mode') in ['Auto',
+                  'Cleaning'] %}green{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_auto
+              - type: custom:mushroom-template-card
+                primary: Spillover
+                icon: mdi:waterfall
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if is_state('sensor.pool_controller_pool_mode',
+                  'Spillover') %}purple{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_spillover
+              - type: custom:mushroom-template-card
+                primary: Ftn Low
+                icon: mdi:fountain
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if is_state('sensor.pool_controller_pool_mode', 'Fountains
+                  Low') %}cyan{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_fountains_low
+              - type: custom:mushroom-template-card
+                primary: Ftn High
+                icon: mdi:fountain
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if is_state('sensor.pool_controller_pool_mode', 'Fountains
+                  High') %}teal{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_fountains_high
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                primary: Pool
+                icon: mdi:pool
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if is_state('sensor.pool_controller_pool_mode', 'Pool')
+                  %}blue{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_pool
+              - type: custom:mushroom-template-card
+                primary: Spa
+                icon: mdi:hot-tub
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if is_state('sensor.pool_controller_pool_mode', 'Spa')
+                  %}orange{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_spa
+              - type: custom:mushroom-template-card
+                primary: Bubbles
+                icon: mdi:chart-bubble
+                layout: vertical
+                fill_container: true
+                icon_color: >-
+                  {% if is_state('sensor.pool_controller_pool_mode', 'Spa
+                  Bubbles') %}amber{% else %}disabled{% endif %}
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_spa_bubbles
+          - type: custom:vertical-stack-in-card
+            cards:
+              - type: custom:vertical-stack-in-card
+                horizontal: true
+                cards:
+                  - type: custom:mushroom-template-card
+                    entity: sensor.pool_controller_pump_rpm
+                    icon: mdi:pump
+                    layout: vertical
+                    fill_container: true
+                    primary: >-
+                      {{ states('sensor.pool_controller_pump_rpm') | int(0) }}
+                      rpm
+                    secondary: >-
+                      {{ states('sensor.pool_controller_pump_flow') | int(0) }}
+                      gpm · {{ states('sensor.pool_controller_pump_power') |
+                      int(0) }} W
+                    icon_color: >-
+                      {% if is_state('binary_sensor.pool_controller_pump_alarm',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_pump_comms_lost',
+                      'on') %}red {% elif
+                      is_state('binary_sensor.pool_controller_pump_running',
+                      'on') %}green {% else %}disabled{% endif %}
+                    badge_color: red
+                    badge_icon: >-
+                      {{ 'mdi:alert' if
+                      is_state('binary_sensor.pool_controller_pump_alarm', 'on')
+                      or
+                      is_state('binary_sensor.pool_controller_pump_comms_lost',
+                      'on') else '' }}
+                    tap_action:
+                      action: more-info
+                  - type: custom:mushroom-template-card
+                    entity: number.pool_controller_chlorine_output
+                    icon: mdi:water-percent
+                    layout: vertical
+                    fill_container: true
+                    primary: >-
+                      {{ states('number.pool_controller_chlorine_output') |
+                      int(0) }}%
+                    secondary: >-
+                      {{ states('sensor.pool_controller_salt_level') | int(0) }}
+                      ppm
+                    icon_color: >-
+                      {% if
+                      is_state('binary_sensor.pool_controller_chlorinator_comms_lost',
+                      'on') or is_state('binary_sensor.pool_controller_no_flow',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_low_salt', 'on')
+                      or is_state('binary_sensor.pool_controller_very_low_salt',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_inspect_cell',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_cell_water_too_cold',
+                      'on') %}red{% else %}blue{% endif %}
+                    badge_color: red
+                    badge_icon: >-
+                      {{ 'mdi:alert' if
+                      is_state('binary_sensor.pool_controller_chlorinator_comms_lost',
+                      'on') or is_state('binary_sensor.pool_controller_no_flow',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_low_salt', 'on')
+                      or is_state('binary_sensor.pool_controller_very_low_salt',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_inspect_cell',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_cell_water_too_cold',
+                      'on') else '' }}
+                    tap_action:
+                      action: more-info
+                  - type: custom:mushroom-template-card
+                    entity: sensor.pool_controller_filter_dirtiness
+                    icon: mdi:air-filter
+                    layout: vertical
+                    fill_container: true
+                    primary: >-
+                      {% set v =
+                      states('sensor.pool_controller_filter_dirtiness') %} {{
+                      ((v | float | round(0) | int) ~ '%') if v not in
+                      ['unknown','unavailable','none',''] else '—' }}
+                    secondary: >-
+                      {{ 'Baseline pending' if
+                      is_state('binary_sensor.pool_controller_filter_baseline_pending',
+                      'on') else 'Filter dirt' }}
+                    icon_color: >-
+                      {% if
+                      is_state('binary_sensor.pool_controller_clean_filter_needed',
+                      'on') %}orange {% else %}green{% endif %}
+                    badge_color: orange
+                    badge_icon: >-
+                      {{ 'mdi:alert' if
+                      is_state('binary_sensor.pool_controller_clean_filter_needed',
+                      'on') else '' }}
+                    tap_action:
+                      action: more-info
+              - type: custom:vertical-stack-in-card
+                horizontal: true
+                cards:
+                  - type: custom:mushroom-template-card
+                    icon: mdi:valve
+                    layout: vertical
+                    fill_container: true
+                    primary: >-
+                      {% set spa =
+                      states('switch.pool_controller_spa_suction_valve') %} {%
+                      set drain =
+                      states('switch.pool_controller_main_drain_suction_valve')
+                      %} {% if spa in ['unknown','unavailable'] or drain in
+                      ['unknown','unavailable'] %}— {%- elif spa == 'on' %}Spa
+                      {%- elif drain == 'on' %}Main Drain {%- else %}Skimmers{%
+                      endif %}
+                    secondary: Suction
+                    icon_color: teal
+                  - type: custom:mushroom-template-card
+                    icon: mdi:valve
+                    layout: vertical
+                    fill_container: true
+                    primary: >-
+                      {% set spa =
+                      states('switch.pool_controller_spa_return_valve') %} {%
+                      set ftn =
+                      states('switch.pool_controller_fountain_return_valve') %}
+                      {% if spa in ['unknown','unavailable'] or ftn in
+                      ['unknown','unavailable'] %}— {%- elif spa == 'on' %}Spa
+                      {%- elif ftn == 'on' %}Fountains {%- else %}Pool Jets{%
+                      endif %}
+                    secondary: Return
+                    icon_color: cyan
+                  - type: custom:mushroom-template-card
+                    entity: switch.pool_controller_booster_pump_relay
+                    icon: mdi:pump
+                    layout: vertical
+                    fill_container: true
+                    primary: Booster
+                    secondary: >-
+                      {{ 'On' if
+                      is_state('switch.pool_controller_booster_pump_relay',
+                      'on') else 'Off' }}
+                    icon_color: >-
+                      {{ 'blue' if
+                      is_state('switch.pool_controller_booster_pump_relay',
+                      'on') else 'disabled' }}
+                    tap_action:
+                      action: more-info
+                  - type: custom:mushroom-template-card
+                    entity: switch.pool_controller_blower_relay
+                    icon: mdi:weather-windy
+                    layout: vertical
+                    fill_container: true
+                    primary: Blower
+                    secondary: >-
+                      {{ 'On' if is_state('switch.pool_controller_blower_relay',
+                      'on') else 'Off' }}
+                    icon_color: >-
+                      {{ 'blue' if
+                      is_state('switch.pool_controller_blower_relay', 'on') else
+                      'disabled' }}
+                    tap_action:
+                      action: more-info
+          - type: custom:mushroom-chips-card
+            alignment: center
+            chips:
+              - type: template
+                icon: mdi:broom
+                content: Run Clean
+                tap_action:
+                  action: perform-action
+                  perform_action: button.press
+                  target:
+                    entity_id: button.pool_controller_run_cleaning_cycle
+              - type: template
+                entity: switch.pool_controller_service_mode
+                icon: mdi:account-wrench
+                content: Service
+                icon_color: >-
+                  {{ 'red' if is_state('switch.pool_controller_service_mode',
+                  'on') else 'disabled' }}
+                tap_action:
+                  action: toggle
+          - type: conditional
+            conditions:
+              - entity: switch.pool_controller_service_mode
+                state: 'on'
+            card:
+              type: entities
+              title: Manual Relays
+              show_header_toggle: false
+              state_color: true
+              entities:
+                - entity: switch.pool_controller_pump_relay
+                  name: Pump
+                - entity: switch.pool_controller_booster_pump_relay
+                  name: Cleaner (Booster)
+                - entity: switch.pool_controller_blower_relay
+                  name: Blower
+                - type: section
+                  label: Valve Actuators
+                - entity: switch.pool_controller_valve_actuator_power
+                  name: Actuator Power
+                - entity: switch.pool_controller_spa_suction_valve
+                  name: Spa Suction
+                - entity: switch.pool_controller_main_drain_suction_valve
+                  name: Main Drain Suction
+                - entity: switch.pool_controller_spa_return_valve
+                  name: Spa Return
+                - entity: switch.pool_controller_fountain_return_valve
+                  name: Fountain Return
+                - type: section
+                  label: Pump
+                - entity: number.pool_controller_pump_flow_setpoint
+                  name: Flow Setpoint
+                - entity: number.pool_controller_pump_rpm_setpoint
+                  name: RPM Setpoint
+                - entity: button.pool_controller_backwash_or_rinse
+                  name: Backwash / Rinse
+                - entity: button.pool_controller_pump_stop
+                  name: Pump Stop
+                - entity: button.pool_controller_mark_filter_clean
+                  name: Mark Filter Clean
+                - type: section
+                  label: Chlorinator
+                - entity: number.pool_controller_chlorine_output
+                  name: Chlorine Output
+          - type: custom:blitzortung-lightning-card
+            distance_entity: sensor.home_lightning_distance
+            counter_entity: sensor.home_lightning_counter
+            azimuth_entity: sensor.home_lightning_azimuth
+            always_show_full_card: true
+            lightning_detection_radius: 12
+            show_radar: true
+            show_map: true
+            period: 1h
+            show_history_chart: true
+            grid_color: var(--primary-text-color)
+            strike_color: var(--error-color)
+            title: Lightning (<6 mi, <30 mins clear pool)
+            card_section_order:
+              - compass_radar
+              - history_chart
+              - map
+      - type: grid
+        cards:
+          - type: custom:card-templater
+            entities:
+              - sensor.pool_controller_surface_water_temperature
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: Surface Temperature
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 35
+                  max: 95
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis:
+                    - 'y': 82
+                      y2: 86
+                      fillColor: '#2ecc7140'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 78
+                      y2: 82
+                      fillColor: '#e67e2230'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 86
+                      y2: 90
+                      fillColor: '#e67e2230'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 35
+                      y2: 78
+                      fillColor: '#3498db20'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 90
+                      y2: 95
+                      fillColor: '#e74c3c20'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  name_in_header: false
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.pool_controller_surface_water_temperature
+                  name: Surface
+                  color_threshold:
+                    - value: 30
+                      color: '#3498db'
+                    - value: 77.99
+                      color: '#3498db'
+                    - value: 78
+                      color: '#e67e22'
+                    - value: 81.99
+                      color: '#e67e22'
+                    - value: 82
+                      color: '#2ecc71'
+                    - value: 85.99
+                      color: '#2ecc71'
+                    - value: 86
+                      color: '#e67e22'
+                    - value: 89.99
+                      color: '#e67e22'
+                    - value: 90
+                      color: '#e74c3c'
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_ph
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: pH
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 7
+                  max: 8.2
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis_template: >-
+                    {% set tmin = state_attr('sensor.backyard_ph', 'target_min')
+                    | float(7.4) %}
+
+                    {% set tmax = state_attr('sensor.backyard_ph', 'target_max')
+                    | float(7.8) %}
+
+                    {% set tgt = state_attr('sensor.backyard_ph', 'target') %}
+
+                    [
+                      {"y": {{ tmin }}, "y2": {{ tmax }}, "fillColor": "#2ecc7140", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmin - 0.2 }}, "y2": {{ tmin }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax }}, "y2": {{ tmax + 0.2 }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": 7.0, "y2": {{ tmin - 0.2 }}, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax + 0.2 }}, "y2": 8.2, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0}{% if tgt is not none %},
+                      {"y": {{ tgt }}, "borderColor": "#ffffff80", "strokeDashArray": 4}{% endif %}
+                    ]
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_ph
+                  name: pH
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_ph', 'last_updated')
+                    %}{% if ts %}{% set age_h = ((as_timestamp(now()) -
+                    as_timestamp(ts)) / 3600) %}{% if age_h >= 48 %}{{ (age_h /
+                    24) | round(0) | int }}d ago{% elif age_h >= 1 %}{{ age_h |
+                    round(0) | int }}h ago{% else %}{{ (age_h * 60) | round(0) |
+                    int }}m ago{% endif %}{% else %}—{% endif %}
+                  color_threshold:
+                    - value: 7
+                      color: '#e74c3c'
+                    - value: 7.2
+                      color: '#f1c40f'
+                    - value: 7.4
+                      color: '#2ecc71'
+                    - value: 7.8
+                      color: '#f1c40f'
+                    - value: 8
+                      color: '#e74c3c'
+                  color_threshold_template: >-
+                    {% set tmin = state_attr('sensor.backyard_ph', 'target_min')
+                    | float(7.4) %}
+
+                    {% set tmax = state_attr('sensor.backyard_ph', 'target_max')
+                    | float(7.8) %}
+
+                    [
+                      {"value": 7, "color": "#e74c3c"},
+                      {"value": {{ tmin - 0.2 - 0.01 }}, "color": "#e74c3c"},
+                      {"value": {{ tmin - 0.2 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin - 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin }}, "color": "#2ecc71"},
+                      {"value": {{ tmax }}, "color": "#2ecc71"},
+                      {"value": {{ tmax + 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 0.2 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 0.2 + 0.01 }}, "color": "#e74c3c"}
+                    ]
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_fc
+              - sensor.backyard_cya
+              - sensor.pool_controller_fc_target
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: Free Chlorine
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 0
+                  max: 15
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis_template: >-
+                    {% set cya = states('sensor.backyard_cya') | float(60) %}
+
+                    {% set cya = [[cya, 20] | max, 100] | min %}
+
+                    {% set fmin = [2, (0.05 * cya) | round(0, 'floor')] | max %}
+
+                    {% set lo = [3, (0.075 * cya) | round(0, 'floor')] | max %}
+
+                    {% set hi = cya / 10 + 3 %}
+
+                    {% set tgt = states('sensor.pool_controller_fc_target') |
+                    float(default=none) %}
+
+                    [
+                      {"y": 0, "y2": {{ fmin }}, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ fmin }}, "y2": {{ lo }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ lo }}, "y2": {{ hi }}, "fillColor": "#2ecc7140", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ hi }}, "y2": 15, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0}{% if tgt is not none %},
+                      {"y": {{ tgt }}, "borderColor": "#ffffff80", "strokeDashArray": 4}{% endif %}
+                    ]
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_fc
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_fc', 'last_updated')
+                    %}{% if ts %}{% set age_h = ((as_timestamp(now()) -
+                    as_timestamp(ts)) / 3600) %}{% if age_h >= 48 %}{{ (age_h /
+                    24) | round(0) | int }}d ago{% elif age_h >= 1 %}{{ age_h |
+                    round(0) | int }}h ago{% else %}{{ (age_h * 60) | round(0) |
+                    int }}m ago{% endif %}{% else %}—{% endif %}
+                  color_threshold_template: |-
+                    {% set cya = states('sensor.backyard_cya') | float(60) %}
+                    {% set cya = [[cya, 20] | max, 100] | min %}
+                    {% set fmin = [2, (0.05 * cya) | round(0, 'floor')] | max %}
+                    {% set lo = [3, (0.075 * cya) | round(0, 'floor')] | max %}
+                    {% set hi = cya / 10 + 3 %}
+                    [
+                      {"value": 0, "color": "#e74c3c"},
+                      {"value": {{ fmin - 0.01 }}, "color": "#e74c3c"},
+                      {"value": {{ fmin }}, "color": "#f1c40f"},
+                      {"value": {{ lo - 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ lo }}, "color": "#2ecc71"},
+                      {"value": {{ hi }}, "color": "#2ecc71"},
+                      {"value": {{ hi + 0.01 }}, "color": "#f1c40f"}
+                    ]
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_cc
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: Combined Chlorine
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 0
+                  max: 3
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis_template: >-
+                    {% set tmin = state_attr('sensor.backyard_cc', 'target_min')
+                    | float(0) %}
+
+                    {% set tmax = state_attr('sensor.backyard_cc', 'target_max')
+                    | float(0.5) %}
+
+                    {% set tgt = state_attr('sensor.backyard_cc', 'target') %}
+
+                    [
+                      {"y": {{ tmin }}, "y2": {{ tmax }}, "fillColor": "#2ecc7140", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax }}, "y2": 3, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0}{% if tgt is not none %},
+                      {"y": {{ tgt }}, "borderColor": "#ffffff80", "strokeDashArray": 4}{% endif %}
+                    ]
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_cc
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_cc', 'last_updated')
+                    %}{% if ts %}{% set age_h = ((as_timestamp(now()) -
+                    as_timestamp(ts)) / 3600) %}{% if age_h >= 48 %}{{ (age_h /
+                    24) | round(0) | int }}d ago{% elif age_h >= 1 %}{{ age_h |
+                    round(0) | int }}h ago{% else %}{{ (age_h * 60) | round(0) |
+                    int }}m ago{% endif %}{% else %}—{% endif %}
+                  color_threshold_template: >-
+                    {% set tmax = state_attr('sensor.backyard_cc', 'target_max')
+                    | float(0.5) %}
+
+                    [
+                      {"value": 0, "color": "#2ecc71"},
+                      {"value": {{ tmax }}, "color": "#2ecc71"},
+                      {"value": {{ tmax + 0.01 }}, "color": "#e74c3c"}
+                    ]
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_ta
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: Total Alkalinity
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 0
+                  max: 140
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis_template: >-
+                    {% set tmin = state_attr('sensor.backyard_ta', 'target_min')
+                    | float(50) %}
+
+                    {% set tmax = state_attr('sensor.backyard_ta', 'target_max')
+                    | float(90) %}
+
+                    {% set tgt = state_attr('sensor.backyard_ta', 'target') %}
+
+                    [
+                      {"y": {{ tmin + 10 }}, "y2": {{ tmax - 10 }}, "fillColor": "#2ecc7140", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmin }}, "y2": {{ tmin + 10 }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax - 10 }}, "y2": {{ tmax }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": 0, "y2": {{ tmin }}, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax }}, "y2": 140, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0}{% if tgt is not none %},
+                      {"y": {{ tgt }}, "borderColor": "#ffffff80", "strokeDashArray": 4}{% endif %}
+                    ]
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_ta
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_ta', 'last_updated')
+                    %}{% if ts %}{% set age_h = ((as_timestamp(now()) -
+                    as_timestamp(ts)) / 3600) %}{% if age_h >= 48 %}{{ (age_h /
+                    24) | round(0) | int }}d ago{% elif age_h >= 1 %}{{ age_h |
+                    round(0) | int }}h ago{% else %}{{ (age_h * 60) | round(0) |
+                    int }}m ago{% endif %}{% else %}—{% endif %}
+                  color_threshold_template: >-
+                    {% set tmin = state_attr('sensor.backyard_ta', 'target_min')
+                    | float(60) %}
+
+                    {% set tmax = state_attr('sensor.backyard_ta', 'target_max')
+                    | float(80) %}
+
+                    [
+                      {"value": 0, "color": "#e74c3c"},
+                      {"value": {{ tmin - 0.01 }}, "color": "#e74c3c"},
+                      {"value": {{ tmin }}, "color": "#f1c40f"},
+                      {"value": {{ tmin + 10 - 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin + 10 }}, "color": "#2ecc71"},
+                      {"value": {{ tmax - 10 }}, "color": "#2ecc71"},
+                      {"value": {{ tmax - 10 + 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 0.01 }}, "color": "#e74c3c"}
+                    ]
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_ch
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: Calcium Hardness
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 150
+                  max: 750
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis_template: >-
+                    {% set tmin = state_attr('sensor.backyard_ch', 'target_min')
+                    | float(300) %}
+
+                    {% set tmax = state_attr('sensor.backyard_ch', 'target_max')
+                    | float(400) %}
+
+                    {% set tgt = state_attr('sensor.backyard_ch', 'target') %}
+
+                    [
+                      {"y": {{ tmin }}, "y2": {{ tmax }}, "fillColor": "#2ecc7140", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmin - 100 }}, "y2": {{ tmin }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax }}, "y2": {{ tmax + 100 }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": 150, "y2": {{ tmin - 100 }}, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax + 100 }}, "y2": 750, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0}{% if tgt is not none %},
+                      {"y": {{ tgt }}, "borderColor": "#ffffff80", "strokeDashArray": 4}{% endif %}
+                    ]
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_ch
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_ch', 'last_updated')
+                    %}{% if ts %}{% set age_h = ((as_timestamp(now()) -
+                    as_timestamp(ts)) / 3600) %}{% if age_h >= 48 %}{{ (age_h /
+                    24) | round(0) | int }}d ago{% elif age_h >= 1 %}{{ age_h |
+                    round(0) | int }}h ago{% else %}{{ (age_h * 60) | round(0) |
+                    int }}m ago{% endif %}{% else %}—{% endif %}
+                  color_threshold_template: >-
+                    {% set tmin = state_attr('sensor.backyard_ch', 'target_min')
+                    | float(300) %}
+
+                    {% set tmax = state_attr('sensor.backyard_ch', 'target_max')
+                    | float(400) %}
+
+                    [
+                      {"value": 150, "color": "#e74c3c"},
+                      {"value": {{ tmin - 100 - 0.01 }}, "color": "#e74c3c"},
+                      {"value": {{ tmin - 100 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin - 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin }}, "color": "#2ecc71"},
+                      {"value": {{ tmax }}, "color": "#2ecc71"},
+                      {"value": {{ tmax + 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 100 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 100 + 0.01 }}, "color": "#e74c3c"}
+                    ]
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_cya
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: CYA
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 20
+                  max: 100
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis:
+                    - 'y': 60
+                      y2: 90
+                      fillColor: '#2ecc7140'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 50
+                      y2: 60
+                      fillColor: '#f1c40f30'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 90
+                      y2: 100
+                      fillColor: '#f1c40f30'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 20
+                      y2: 50
+                      fillColor: '#e74c3c20'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_cya
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_cya',
+                    'last_updated') %}{% if ts %}{% set age_h =
+                    ((as_timestamp(now()) - as_timestamp(ts)) / 3600) %}{% if
+                    age_h >= 48 %}{{ (age_h / 24) | round(0) | int }}d ago{%
+                    elif age_h >= 1 %}{{ age_h | round(0) | int }}h ago{% else
+                    %}{{ (age_h * 60) | round(0) | int }}m ago{% endif %}{% else
+                    %}—{% endif %}
+                  color_threshold:
+                    - value: 20
+                      color: '#e74c3c'
+                    - value: 49.99
+                      color: '#e74c3c'
+                    - value: 50
+                      color: '#f1c40f'
+                    - value: 59.99
+                      color: '#f1c40f'
+                    - value: 60
+                      color: '#2ecc71'
+                    - value: 90
+                      color: '#2ecc71'
+                    - value: 90.01
+                      color: '#f1c40f'
+                    - value: 100
+                      color: '#f1c40f'
+                    - value: 100.01
+                      color: '#e74c3c'
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.pool_salt
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: Salt
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: 2000
+                  max: 5000
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis:
+                    - 'y': 3000
+                      y2: 3800
+                      fillColor: '#2ecc7140'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 2600
+                      y2: 3000
+                      fillColor: '#f1c40f30'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 3800
+                      y2: 4500
+                      fillColor: '#f1c40f30'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 2000
+                      y2: 2600
+                      fillColor: '#e74c3c20'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 4500
+                      y2: 5000
+                      fillColor: '#e74c3c20'
+                      borderColor: '#00000000'
+                      strokeDashArray: 0
+                    - 'y': 3400
+                      borderColor: '#ffffff80'
+                      strokeDashArray: 4
+                legend:
+                  show: false
+              all_series_config:
+                type: line
+                show:
+                  legend_value: false
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.pool_salt
+                  stroke_width: 2
+                  show:
+                    header_color_threshold: true
+                  name_template: >-
+                    {% set ts = state_attr('sensor.pool_salt', 'last_updated')
+                    %}{% if ts %}{% set age_h = ((as_timestamp(now()) -
+                    as_timestamp(ts)) / 3600) %}{% if age_h >= 48 %}{{ (age_h /
+                    24) | round(0) | int }}d ago{% elif age_h >= 1 %}{{ age_h |
+                    round(0) | int }}h ago{% else %}{{ (age_h * 60) | round(0) |
+                    int }}m ago{% endif %}{% else %}—{% endif %}
+                  color_threshold:
+                    - value: 2000
+                      color: '#e74c3c'
+                    - value: 2599.99
+                      color: '#e74c3c'
+                    - value: 2600
+                      color: '#f1c40f'
+                    - value: 2999.99
+                      color: '#f1c40f'
+                    - value: 3000
+                      color: '#2ecc71'
+                    - value: 3800
+                      color: '#2ecc71'
+                    - value: 3800.01
+                      color: '#f1c40f'
+                    - value: 4500
+                      color: '#f1c40f'
+                    - value: 4500.01
+                      color: '#e74c3c'
+                - entity: sensor.pool_controller_salt_level
+                  name: Cell
+                  color: '#95a5a6'
+                  stroke_width: 1
+                  show:
+                    header_color_threshold: false
+              graph_span: 30d
+              span:
+                end: day
+          - type: custom:card-templater
+            entities:
+              - sensor.backyard_csi
+            card:
+              type: custom:apexcharts-card
+              header:
+                show: true
+                title: CSI
+                show_states: true
+                floating: true
+                colorize_states: true
+              experimental:
+                color_threshold: true
+              yaxis:
+                - min: -0.9
+                  max: 0.9
+                  show: false
+              apex_config:
+                chart:
+                  height: 120
+                  sparkline:
+                    enabled: true
+                xaxis:
+                  labels:
+                    show: false
+                  axisTicks:
+                    show: false
+                  axisBorder:
+                    show: false
+                grid:
+                  show: false
+                annotations:
+                  yaxis_template: >-
+                    {% set tmin = state_attr('sensor.backyard_csi',
+                    'target_min') | float(-0.3) %}
+
+                    {% set tmax = state_attr('sensor.backyard_csi',
+                    'target_max') | float(0.3) %}
+
+                    {% set tgt = state_attr('sensor.backyard_csi', 'target') %}
+
+                    [
+                      {"y": {{ tmin }}, "y2": {{ tmax }}, "fillColor": "#2ecc7140", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmin - 0.3 }}, "y2": {{ tmin }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax }}, "y2": {{ tmax + 0.3 }}, "fillColor": "#f1c40f30", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": -0.9, "y2": {{ tmin - 0.3 }}, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0},
+                      {"y": {{ tmax + 0.3 }}, "y2": 0.9, "fillColor": "#e74c3c20", "borderColor": "#00000000", "strokeDashArray": 0}{% if tgt is not none %},
+                      {"y": {{ tgt }}, "borderColor": "#ffffff80", "strokeDashArray": 4}{% endif %}
+                    ]
+                legend:
+                  show: false
+              all_series_config:
+                stroke_width: 2
+                type: line
+                show:
+                  legend_value: false
+                  header_color_threshold: true
+                  in_header: raw
+                statistics:
+                  type: mean
+                  period: hour
+              series:
+                - entity: sensor.backyard_csi
+                  name_template: >-
+                    {% set ts = state_attr('sensor.backyard_csi',
+                    'last_updated') %}{% if ts %}{% set age_h =
+                    ((as_timestamp(now()) - as_timestamp(ts)) / 3600) %}{% if
+                    age_h >= 48 %}{{ (age_h / 24) | round(0) | int }}d ago{%
+                    elif age_h >= 1 %}{{ age_h | round(0) | int }}h ago{% else
+                    %}{{ (age_h * 60) | round(0) | int }}m ago{% endif %}{% else
+                    %}—{% endif %}
+                  color_threshold_template: >-
+                    {% set tmin = state_attr('sensor.backyard_csi',
+                    'target_min') | float(-0.3) %}
+
+                    {% set tmax = state_attr('sensor.backyard_csi',
+                    'target_max') | float(0.3) %}
+
+                    [
+                      {"value": -0.9, "color": "#e74c3c"},
+                      {"value": {{ tmin - 0.3 - 0.01 }}, "color": "#e74c3c"},
+                      {"value": {{ tmin - 0.3 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin - 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmin }}, "color": "#2ecc71"},
+                      {"value": {{ tmax }}, "color": "#2ecc71"},
+                      {"value": {{ tmax + 0.01 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 0.3 }}, "color": "#f1c40f"},
+                      {"value": {{ tmax + 0.3 + 0.01 }}, "color": "#e74c3c"}
+                    ]
+              graph_span: 30d
+              span:
+                end: day
+      - type: grid
+        cards:
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Temperature (current)
+            experimental:
+              color_threshold: true
+            yaxis:
+              - min: '|-0|'
+                max: '|+0|'
+            all_series_config:
+              stroke_width: 2
+              type: line
+              show:
+                legend_value: false
+            series:
+              - entity: sensor.pool_controller_outdoor_temperature
+                name: Air
+              - entity: sensor.pool_controller_spa_water_temperature
+                name: Spa
+              - entity: sensor.pool_controller_surface_water_temperature
+                name: Surface
+              - entity: sensor.pool_controller_deep_water_temperature
+                name: Deep
+            graph_span: 1d
+            span:
+              end: minute
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: 7d Temperature
+            yaxis:
+              - min: '|-0|'
+                max: '|+0|'
+            all_series_config:
+              stroke_width: 2
+              type: line
+              show:
+                legend_value: false
+                header_color_threshold: true
+                name_in_header: false
+              statistics:
+                type: mean
+                period: hour
+            series:
+              - entity: sensor.pool_controller_outdoor_temperature
+                name: Air
+              - entity: sensor.pool_controller_spa_water_temperature
+                name: Spa
+              - entity: sensor.pool_controller_surface_water_temperature
+                name: Surface
+              - entity: sensor.pool_controller_deep_water_temperature
+                name: Deep
+            graph_span: 7d
+            span:
+              end: day
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: 30d Temperature
+            yaxis:
+              - min: '|-0|'
+                max: '|+0|'
+            all_series_config:
+              stroke_width: 2
+              type: line
+              show:
+                legend_value: false
+                header_color_threshold: true
+                name_in_header: false
+              statistics:
+                type: mean
+                period: hour
+            series:
+              - entity: sensor.pool_controller_outdoor_temperature
+                name: Air
+              - entity: sensor.pool_controller_spa_water_temperature
+                name: Spa
+              - entity: sensor.pool_controller_surface_water_temperature
+                name: Surface
+              - entity: sensor.pool_controller_deep_water_temperature
+                name: Deep
+            graph_span: 30d
+            span:
+              end: day
+    cards: []

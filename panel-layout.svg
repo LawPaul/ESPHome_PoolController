@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="750" viewBox="0 0 560 375" font-family="Helvetica, Arial, sans-serif">
+  <!-- ================ Title ================ -->
+  <text x="10" y="16" font-size="12" font-weight="bold">Pool Controller — Back-Panel Layout (front view · 1 unit = 1 mm, to scale)</text>
+
+  <!-- ================ Panel outline ================ -->
+  <rect x="5" y="24" width="548" height="340" fill="#fafafa" stroke="#333" stroke-width="1.5"/>
+
+  <!-- ================ DIN RAIL — single rail (all devices) ================ -->
+  <!-- Rail centerline at y=210: everything straddles the rail. TIB40A sits with the rail 1.792 in (45.5 mm) up from its bottom; HDR-30 + Waveshare + blocks straddle their midpoints. -->
+  <!-- Fuseless (Hayward-style): branch breaker + PSU internal OCP + Class-2 transformer (TIB40A has its own breaker); 14 AWG for the short 120 V taps. -->
+  <!-- Terminal blocks are UT 2,5-3PV (3214262) multi-level (3-level, 6 commoned points, 5.2 mm) - one block per rail. -->
+  <text x="10" y="128" font-size="8" font-weight="bold" fill="#555">DIN RAIL — single rail (all devices)</text>
+  <rect x="8" y="207" width="358" height="6" fill="#c9c9c9" stroke="#999"/>
+
+  <!-- TIB40A 40 VA transformer (housed, DIN, UL Class 2, built-in breaker; 79 x 110 mm; rail 45.5 mm up from bottom -> top y=145.5, bottom y=255.5) -->
+  <rect x="9" y="145.5" width="79" height="110" fill="#fff3cd" stroke="#997404"/>
+  <text x="48.5" y="182" font-size="7" text-anchor="middle" font-weight="bold">TIB40A</text>
+  <text x="48.5" y="192" font-size="6" text-anchor="middle" fill="#555">40 VA · Class 2</text>
+  <text x="48.5" y="202" font-size="6" text-anchor="middle" fill="#555">120→24 VAC</text>
+  <text x="48.5" y="250" font-size="6" text-anchor="middle" fill="#888">79 × 110</text>
+
+  <!-- PSU HDR-30-24 (35 x 90 mm; rail through midpoint y=210 -> top y=165, bottom y=255) -->
+  <rect x="89" y="165" width="35" height="90" fill="#fff3cd" stroke="#997404"/>
+  <text x="106.5" y="203" font-size="7" text-anchor="middle" font-weight="bold">HDR-30-24</text>
+  <text x="106.5" y="213" font-size="6.5" text-anchor="middle" fill="#555">24 VDC PSU</text>
+  <text x="106.5" y="249" font-size="6" text-anchor="middle" fill="#888">35 × 90</text>
+
+  <!-- Terminal blocks: UT 2,5-3PV (3214262) multi-level (3-level, 6-pt all-connected), 5.2 mm wide x 90 mm tall; one block per rail. -->
+  <!-- Drawn to scale: 5.2 wide x 90 tall, bottom-aligned with PSU/controller (y=165 to 255), rail through at y=210; 2 faint lines = the 3 stacked wire-entry levels. Depth on NS 35/7,5 rail = 77.5 mm (85 on NS 35/15). | = partition plate. -->
+  <!-- mains 120 V (red): L120, N120 -->
+  <rect x="126.0" y="165" width="5.2" height="90" fill="#f8d7da" stroke="#b02a37"/>
+  <line x1="126.0" y1="195" x2="131.2" y2="195" stroke="#c98a92" stroke-width="0.4"/>
+  <line x1="126.0" y1="225" x2="131.2" y2="225" stroke="#c98a92" stroke-width="0.4"/>
+  <line x1="131.95" y1="165" x2="131.95" y2="255" stroke="#333" stroke-width="1"/>
+  <rect x="132.7" y="165" width="5.2" height="90" fill="#f8d7da" stroke="#b02a37"/>
+  <line x1="132.7" y1="195" x2="137.9" y2="195" stroke="#c98a92" stroke-width="0.4"/>
+  <line x1="132.7" y1="225" x2="137.9" y2="225" stroke="#c98a92" stroke-width="0.4"/>
+  <line x1="138.65" y1="165" x2="138.65" y2="255" stroke="#333" stroke-width="1"/>
+  <!-- LV distribution (grey): DC+, DC-, ACH, ACC -->
+  <rect x="139.4" y="165" width="5.2" height="90" fill="#e2e3e5" stroke="#6c757d"/>
+  <line x1="139.4" y1="195" x2="144.6" y2="195" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="139.4" y1="225" x2="144.6" y2="225" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="145.35" y1="165" x2="145.35" y2="255" stroke="#333" stroke-width="1"/>
+  <rect x="146.1" y="165" width="5.2" height="90" fill="#e2e3e5" stroke="#6c757d"/>
+  <line x1="146.1" y1="195" x2="151.3" y2="195" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="146.1" y1="225" x2="151.3" y2="225" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="152.05" y1="165" x2="152.05" y2="255" stroke="#333" stroke-width="1"/>
+  <rect x="152.8" y="165" width="5.2" height="90" fill="#e2e3e5" stroke="#6c757d"/>
+  <line x1="152.8" y1="195" x2="158.0" y2="195" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="152.8" y1="225" x2="158.0" y2="225" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="158.75" y1="165" x2="158.75" y2="255" stroke="#333" stroke-width="1"/>
+  <rect x="159.5" y="165" width="5.2" height="90" fill="#e2e3e5" stroke="#6c757d"/>
+  <line x1="159.5" y1="195" x2="164.7" y2="195" stroke="#adb5bd" stroke-width="0.4"/>
+  <line x1="159.5" y1="225" x2="164.7" y2="225" stroke="#adb5bd" stroke-width="0.4"/>
+  <rect x="164.7" y="165" width="3.5" height="90" fill="#c9c9c9" stroke="#999"/>
+  <text x="128.6" y="263" font-size="5" text-anchor="middle" font-weight="bold">L120</text>
+  <text x="135.3" y="263" font-size="5" text-anchor="middle" font-weight="bold">N120</text>
+  <text x="142.0" y="263" font-size="5" text-anchor="middle" font-weight="bold">DC+</text>
+  <text x="148.7" y="263" font-size="5" text-anchor="middle" font-weight="bold">DC−</text>
+  <text x="155.4" y="263" font-size="5" text-anchor="middle" font-weight="bold">ACH</text>
+  <text x="162.1" y="263" font-size="5" text-anchor="middle" font-weight="bold">ACC</text>
+  <text x="147" y="270" font-size="4.5" text-anchor="middle" fill="#888">UT 2,5-3PV: 3-level 6-pt, 5.2 × 90 mm, one per rail</text>
+
+  <!-- Waveshare controller (175 x 90 mm; rail through midpoint y=210 -> top y=165, bottom y=255) -->
+  <rect x="189" y="165" width="175" height="90" fill="#cfe2ff" stroke="#0a58ca"/>
+  <text x="276.5" y="203" font-size="9" text-anchor="middle" font-weight="bold">Waveshare ESP32-S3-ETH</text>
+  <text x="276.5" y="215" font-size="7" text-anchor="middle" fill="#555">8DI-8RO controller</text>
+  <text x="276.5" y="249" font-size="6.5" text-anchor="middle" fill="#888">175 × 90</text>
+
+  <!-- Actuator = 3-pin female JST XH; mating male JST XH pigtail leads land Red->NC White->NO (relays 5-8), Black->ACC -->
+  <!-- RS485 A/B pair (both devices) lands directly on the Waveshare terminals; terminate at pump + PC100 -->
+  <!-- PE is NOT on the rail: reuse the existing grounding block in the Hayward case (see below) -->
+
+  <!-- rail centerline overlaid (dashed) to show it passes through all device midpoints -->
+  <line x1="8" y1="210" x2="366" y2="210" stroke="#999" stroke-width="0.5" stroke-dasharray="3 2"/>
+
+  <!-- ================ G7L relay bank (bolted, already mounted) ================ -->
+  <text x="25" y="298" font-size="8" font-weight="bold" fill="#555">BOLTED TO PANEL — G7L bank (already mounted; positions per existing holes)</text>
+  <g font-size="6.5" text-anchor="middle">
+    <rect x="25"    y="304" width="68.5" height="34.5" fill="#ececff" stroke="#444"/>
+    <text x="59.25"  y="319">G7L #1</text><text x="59.25"  y="328" font-size="5.8" fill="#555">pump + PC100</text><text x="59.25" y="336" font-size="5" fill="#888">68.5 × 34.5</text>
+    <rect x="99.5"  y="304" width="68.5" height="34.5" fill="#ececff" stroke="#444"/>
+    <text x="133.75" y="319">G7L #2</text><text x="133.75" y="328" font-size="5.8" fill="#555">valve 24 VAC</text>
+    <rect x="174"   y="304" width="68.5" height="34.5" fill="#ececff" stroke="#444"/>
+    <text x="208.25" y="319">G7L #3</text><text x="208.25" y="328" fill="#555">booster</text>
+    <rect x="248.5" y="304" width="68.5" height="34.5" fill="#ececff" stroke="#444"/>
+    <text x="282.75" y="319">G7L #4</text><text x="282.75" y="328" fill="#555">blower</text>
+  </g>
+
+  <!-- Existing PE ground block (reused from the Hayward enclosure, not a purchased part) -->
+  <rect x="330" y="305" width="140" height="30" fill="#d1e7dd" stroke="#146c43"/>
+  <text x="400" y="318" font-size="6.5" text-anchor="middle" font-weight="bold">PE ground (existing)</text>
+  <text x="400" y="328" font-size="5" text-anchor="middle" fill="#555">reused Hayward case block — bond all metal + shields</text>
+
+  <!-- ================ Legend (right column) ================ -->
+  <g font-size="7">
+    <text x="400" y="70" font-size="8" font-weight="bold">Zone key</text>
+    <rect x="400" y="76" width="12" height="9" fill="#f8d7da" stroke="#b02a37"/><text x="416" y="83">mains 120 V</text>
+    <rect x="400" y="88" width="12" height="9" fill="#fff3cd" stroke="#997404"/><text x="416" y="95">power 24 V</text>
+    <rect x="400" y="100" width="12" height="9" fill="#cfe2ff" stroke="#0a58ca"/><text x="416" y="107">signal</text>
+    <rect x="400" y="112" width="12" height="9" fill="#e2e3e5" stroke="#6c757d"/><text x="416" y="119">LV distribution</text>
+    <rect x="400" y="124" width="12" height="9" fill="#d1e7dd" stroke="#146c43"/><text x="416" y="131">bond / PE</text>
+    <rect x="400" y="136" width="12" height="9" fill="#ececff" stroke="#444"/><text x="416" y="143">G7L relay (bolted)</text>
+  </g>
+
+  <!-- Scale bar 50 mm -->
+  <g>
+    <line x1="400" y1="158" x2="450" y2="158" stroke="#333" stroke-width="1.5"/>
+    <line x1="400" y1="155" x2="400" y2="161" stroke="#333" stroke-width="1.5"/>
+    <line x1="450" y1="155" x2="450" y2="161" stroke="#333" stroke-width="1.5"/>
+    <text x="425" y="169" font-size="7" text-anchor="middle">50 mm</text>
+  </g>
+
+  <!-- Notes -->
+  <g font-size="6.3" fill="#555">
+    <text x="400" y="184">Numbers = footprint W × H (mm).</text>
+    <text x="400" y="193">Confirmed: Waveshare 175×90,</text>
+    <text x="400" y="202">HDR-30-24 35×90, UT 2,5-3PV = 5.2 mm.</text>
+    <text x="400" y="211">Fuseless: branch breaker + Class-2 xfmr.</text>
+    <text x="400" y="220">TIB40A xfmr 79×110 (housed, Class 2, own breaker).</text>
+    <text x="400" y="229">Verify all vs datasheets before drilling.</text>
+    <text x="400" y="238" font-size="5.5">Blocks: UT 2,5-3PV (3214262) 3-level, 6-pt all-connected.</text>
+    <text x="400" y="247" font-size="5.5">One block per rail: L120, N120, DC+, DC−, ACH, ACC.</text>
+  </g>
+
+  <!-- Cable-entry glands (bottom edge) -->
+  <g>
+    <circle cx="300" cy="352" r="5" fill="#fff" stroke="#333"/><text x="309" y="349" font-size="6">120 V in</text>
+    <circle cx="345" cy="352" r="5" fill="#fff" stroke="#333"/><text x="354" y="349" font-size="6">240 V loads</text>
+    <circle cx="400" cy="352" r="5" fill="#fff" stroke="#333"/><text x="409" y="349" font-size="6">RS485 / valves</text>
+  </g>
+
+  <!-- ================ Usable area ABOVE the G7L relays ================ -->
+  <!-- 14.25 in (362 mm) wide x 6.75 in (171 mm) tall; bottom-aligned to the relay tops (y=304) -->
+  <rect x="8" y="133" width="362" height="171" fill="none" stroke="#d63384" stroke-width="1.5" stroke-dasharray="6 3"/>
+  <text x="12" y="298" font-size="6.5" font-weight="bold" fill="#d63384">Usable area above relays: 14.25 × 6.75 in (362 × 171 mm) — single rail fits (~2 mm spare width).</text>
+</svg>

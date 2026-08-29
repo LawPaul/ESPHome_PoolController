@@ -1,0 +1,1182 @@
+
+# =====================================================================
+# Relays 1-8 via the TCA9554 expander (EXIO1-8 -> bits 0-7)
+# NOTE: verify EXIO->bit order against the Waveshare schematic; if a
+# channel is mirrored, adjust the `number:` under each pin.
+# Mapping mirrors wiring.md:
+#   CH1 pump power (G7L#1) | CH2 valve 24 VAC power (G7L#2)
+#   CH3 booster (G7L#3)    | CH4 blower (G7L#4)
+#   CH5-8 JVA valve actuators (energized = White/NO position)
+# =====================================================================
+switch:
+  # Physical actuator, firmware-only (internal) — HA sees the service-gated
+  # mirror below. Keep the power-on timestamp here so it fires whoever commands it.
+  - platform: gpio
+    id: relay_pump_power
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 0
+      mode:
+        output: true
+    # Timestamp power-on so the RS485 watchdog only expects pump telemetry
+    # while the pump is actually energised (comms need the relay on).
+    on_turn_on:
+      - lambda: 'id(pump_pwr_since) = millis();'
+    on_turn_off:
+      - lambda: 'id(pump_pwr_since) = 0;'
+
+  # EXIO2 drives spare G7L#2, whose two NO poles interrupt both transformer
+  # secondary legs upstream of ACH/ACC. ON powers all valve actuators; OFF lets
+  # a technician move a valve by hand without its actuator driving back to the
+  # commanded position. Default ON so a reboot returns valve control to
+  # automation. The public control below is service-gated.
+  - platform: gpio
+    id: relay_valve_power
+    internal: true
+    restore_mode: ALWAYS_ON
+    pin:
+      pca9554: relay_expander
+      number: 1
+      mode:
+        output: true
+    on_turn_on:
+      # Re-energising a manually displaced actuator starts motion without a
+      # direction-relay edge, so explicitly open the same travel window.
+      - lambda: |-
+          id(valve_motion_until) = millis() +
+              (uint32_t) (id(valve_delay_s).state * 1000.0f);
+
+  # The salt cell (PC100/Plus60) is powered from the LOAD side of the pump's
+  # G7L#1 power relay -- an OEM-style hardware interlock. There is no separate
+  # chlorinator GPIO.
+
+  # Physical actuator, firmware-only (internal) — HA sees the mirror below.
+  - platform: gpio
+    id: relay_booster
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 2
+      mode:
+        output: true
+
+  # Physical actuator, firmware-only (internal) — HA sees the mirror below.
+  - platform: gpio
+    id: relay_blower
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 3
+      mode:
+        output: true
+
+  # Physical actuator, firmware-only (internal) — HA sees the mirror below.
+  - platform: gpio
+    id: relay_valve1
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 4
+      mode:
+        output: true
+    # Any diverter movement (from ANY source — scene, freeze, cleaning, or a
+    # manual/service toggle) dips the pump for the travel window. Mechanical
+    # protection is never suspended, unlike the freeze/chlorine automation.
+    on_turn_on:
+      - script.execute: valve_travel_guard
+    on_turn_off:
+      - script.execute: valve_travel_guard
+
+  # Physical actuator, firmware-only (internal) — HA sees the mirror below.
+  - platform: gpio
+    id: relay_valve2
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 5
+      mode:
+        output: true
+    on_turn_on:
+      - script.execute: valve_travel_guard
+    on_turn_off:
+      - script.execute: valve_travel_guard
+
+  # Physical actuator, firmware-only (internal) — HA sees the mirror below.
+  - platform: gpio
+    id: relay_valve3
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 6
+      mode:
+        output: true
+    on_turn_on:
+      - script.execute: valve_travel_guard
+    on_turn_off:
+      - script.execute: valve_travel_guard
+
+  # Physical actuator, firmware-only (internal) — HA sees the mirror below.
+  - platform: gpio
+    id: relay_valve4
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pca9554: relay_expander
+      number: 7
+      mode:
+        output: true
+    # Fountain return: unlike the other three diverters, a creep dip is not
+    # enough here. Mid-travel the fountain feed is throttled, so the arcing
+    # jets fall short of the water and dribble onto the deck. Raise the stop
+    # flag so valve_travel_guard stops the pump outright for the travel window
+    # (both directions — either way it passes through the partial position).
+    on_turn_on:
+      - lambda: 'id(valve_stop_window) = true;'
+      - script.execute: valve_travel_guard
+    on_turn_off:
+      - lambda: 'id(valve_stop_window) = true;'
+      - script.execute: valve_travel_guard
+
+  # Manual maintenance override. Highest arbitration priority: suspends freeze
+  # protection, the cleaning schedule and the holding pattern so a technician
+  # has full manual control of the relays. It is also the only way to change
+  # plumbing while a freeze would otherwise hold the modes locked. Not
+  # persisted — a reboot returns to automatic operation.
+  - platform: template
+    name: "Service Mode"
+    id: service_mode
+    icon: "mdi:wrench-clock"
+    optimistic: true
+    turn_on_action:
+      - lambda: 'id(pool_ctrl).set_service(true);'
+      - logger.log:
+          level: WARN
+          format: "SERVICE MODE ON: automation suspended, equipment stopped"
+      # Stop the pump, booster and blower and zero the cell before anyone puts
+      # hands on the plumbing. Suspending automation alone would leave whatever
+      # was already running still running.
+      - script.execute: service_safe_state
+    turn_off_action:
+      # Restore actuator power before releasing plumbing back to automation;
+      # an actuator moved by hand may travel as soon as power returns. Keep
+      # Service Mode active until that travel window ends, then apply_base_mode.
+      - switch.turn_on: relay_valve_power
+      - delay: !lambda |-
+          const int32_t remaining =
+              (int32_t) (id(valve_motion_until) - millis());
+          return remaining > 0 ? (uint32_t) remaining : 0U;
+      - lambda: 'id(pool_ctrl).set_service(false);'
+      - logger.log: "Service mode OFF: resuming automatic operation"
+      # Full restore to automatic operation. apply_base_mode re-resolves the
+      # plumbing (valves + blower + flow) for whoever owns it now and cancels any
+      # clean the service interrupted; but the booster is owned ONLY by the
+      # cleaning cycle, so a Polaris a tech left running would otherwise persist —
+      # drop it explicitly (a running cycle's clean_tick re-asserts it within 1s).
+      # Then kick the supervisor + chlorine loops so the cell re-energises and the
+      # IntelliChlor output setpoint re-asserts immediately instead of waiting for their
+      # 2 s / 15 min backstops.
+      - switch.turn_off: relay_booster
+      - script.execute: apply_base_mode
+      - script.execute: supervisor_apply
+      - script.execute: chlorine_apply
+
+  # NOTE: the "Chlorinator Relay" diagnostic switch has been removed. There is no
+  # longer a dedicated cell relay -- the PC100 is fed from the LOAD side of the
+  # pump's G7L#1 power relay, so the cell is powered whenever the pump is. Users
+  # set chlorination via the "Chlorine Output" number; flow gating is automatic (see
+  # the note above the pump-power relay).
+
+  # Chlorine boost (Pentair-style super-chlorinate): ON drives the Boost Output
+  # setpoint for Boost Duration, then auto-returns to the normal control loop and
+  # flips itself OFF; OFF cancels immediately and hands back to auto. State is not
+  # optimistic — it reflects the controller's real boost flag (boost_active), so it
+  # can never show a boost that isn't running nor miss the timed auto-expiry.
+  - platform: template
+    name: "Chlorine Boost"
+    id: boost_switch
+    icon: "mdi:flash"
+    optimistic: false
+    lambda: "return id(pool_ctrl).boost_active();"
+    turn_on_action:
+      - script.execute: chlorine_boost
+    turn_off_action:
+      - script.stop: chlorine_boost
+      - lambda: 'id(pool_ctrl).set_boost_active(false);'
+      - script.execute: chlorine_apply
+
+  # Run the idle holding pattern on a SPEED (rpm) setpoint instead of a flow
+  # (gpm) one. The pump's flow mode floors at 20 GPM; speed mode reaches 450 rpm,
+  # and power goes as rpm^3, so this is the low-power circulation lever (see the
+  # Holding RPM number and the pump_run_rpm script). Affects ONLY the Pool/Auto
+  # holding scene — every other scene, and freeze protection, keep their GPM
+  # setpoints because they have real hydraulic duties.
+  #
+  # Trade-off to accept before enabling: nothing closed-loop is holding flow any
+  # more, so as the sand filter loads, flow DROPS at the fixed rpm instead of the
+  # drive compensating. Watch that the salt cell keeps generating. The "Filter
+  # Load" sensor also goes blank in this mode (its baseline is rpm-at-a-reference-
+  # flow, which no longer applies) — switch back to flow mode to read it.
+  - platform: template
+    name: "Holding RPM Mode"
+    id: holding_rpm_mode
+    entity_category: config
+    icon: "mdi:speedometer-slow"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - script.execute: apply_plumbing_now
+    on_turn_off:
+      - script.execute: apply_plumbing_now
+
+
+# =====================================================================
+# Service-gated raw relay mirrors (diagnostic). The physical relays above are
+# internal (firmware-only); these expose them to HA for visibility and let a
+# technician actuate them BUT ONLY while Service Mode is on. Outside service the
+# toggle is ignored and the switch snaps back to the real relay state (the
+# lambda reflects the physical pin), so it can never show a state the controller
+# didn't honor. Day-to-day use the mode buttons — not these.
+# =====================================================================
+  - platform: template
+    name: "Valve Actuator Power"
+    id: relay_valve_power_ctrl
+    icon: "mdi:electric-switch"
+    entity_category: diagnostic
+    lambda: "return id(relay_valve_power).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_valve_power
+          else:
+            - logger.log: "Valve power ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_valve_power
+          else:
+            - logger.log: "Valve power ignored: enable Service Mode to actuate"
+
+  - platform: template
+    name: "Pump Relay"
+    id: relay_pump_power_ctrl
+    icon: "mdi:pump"
+    entity_category: diagnostic
+    lambda: "return id(relay_pump_power).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_pump_power
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_pump_power
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+  - platform: template
+    name: "Booster Pump Relay"
+    id: relay_booster_ctrl
+    icon: "mdi:pump"
+    entity_category: diagnostic
+    lambda: "return id(relay_booster).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_booster
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_booster
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+  - platform: template
+    name: "Blower Relay"
+    id: relay_blower_ctrl
+    icon: "mdi:weather-windy"
+    entity_category: diagnostic
+    lambda: "return id(relay_blower).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_blower
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_blower
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+# =====================================================================
+# Diverter valve overrides (SWITCH)
+# ---------------------------------------------------------------------
+# Two-position diverters, exposed as on/off switches. Each is named after the
+# position that ON engages; OFF is the normal/pool path (documented per switch).
+# Diagnostic, service-only: the switch reads back the true relay state (the
+# lambda reflects the physical pin) so it can never show a state the controller
+# didn't apply, and a toggle is honored only while Service Mode is on — otherwise
+# it snaps back and logs. Day-to-day the scenes drive the relays.
+# =====================================================================
+  # ON = draw suction from the spa; OFF = from the pool.
+  - platform: template
+    name: "Spa Suction Valve"
+    id: relay_valve1_ctrl
+    icon: "mdi:valve"
+    entity_category: diagnostic
+    lambda: "return id(relay_valve1).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_valve1
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_valve1
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+  # ON = pool suction from the main drain; OFF = from the skimmers.
+  - platform: template
+    name: "Main Drain Suction Valve"
+    id: relay_valve2_ctrl
+    icon: "mdi:valve"
+    entity_category: diagnostic
+    lambda: "return id(relay_valve2).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_valve2
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_valve2
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+  # ON = return water to the spa; OFF = to the pool.
+  - platform: template
+    name: "Spa Return Valve"
+    id: relay_valve3_ctrl
+    icon: "mdi:valve"
+    entity_category: diagnostic
+    lambda: "return id(relay_valve3).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_valve3
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_valve3
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+  # ON = pool return through the fountains; OFF = through the jets.
+  - platform: template
+    name: "Fountain Return Valve"
+    id: relay_valve4_ctrl
+    icon: "mdi:valve"
+    entity_category: diagnostic
+    lambda: "return id(relay_valve4).state;"
+    turn_on_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_on: relay_valve4
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - switch.turn_off: relay_valve4
+          else:
+            - logger.log: "Raw relay ignored: enable Service Mode to actuate"
+
+
+# =====================================================================
+# Sensors
+# =====================================================================
+sensor:
+  # --- Connectivity diagnostics ---
+  # ESPHome + the HA native API already give availability (online/offline) for
+  # free; these add the two things it does NOT expose automatically: a trendable
+  # signal strength (catch a degrading link before it drops) and uptime (spot
+  # silent reboots that a fast reconnect would otherwise hide).
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_rssi
+    entity_category: diagnostic
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    id: device_uptime
+    entity_category: diagnostic
+    update_interval: 60s
+
+  # Two DS18B20 probes now share the GPIO21 one-wire bus, so BOTH must be pinned
+  # to their ROM address. On first boot ESPHome logs every device it finds
+  # ("Found sensor 0x...."); copy each 64-bit address into the matching `address:`
+  # below, then re-flash. Until then both probes read "unknown".
+  - platform: dallas_temp
+    name: "Outdoor Temperature"
+    id: outdoor_temp
+    address: 0x18000010ed158428   # outdoor probe ROM (captured from boot log 2026-07-11)
+    update_interval: 60s
+    # Stamp freshness ONLY on a valid reading so a NaN/dead probe goes stale and
+    # freeze protection fails safe (see the freeze interval in logic.yaml).
+    on_value:
+      - lambda: 'if (!isnan(x)) id(outdoor_temp_seen) = millis();'
+
+  # Pool water temperature — waterproof DS18B20 in the RETURN line (thermowell /
+  # tee after the filter+cell, or strapped to the pipe under insulation). This is
+  # the authoritative water temp now that the IntelliChlor Plus60 does not reliably
+  # report a temp number over RS-485. It reads the circulating water, so the
+  # per-source demux (logic.yaml) still gates on pump-running + settle before
+  # attributing a reading to the selected suction source.
+  - platform: dallas_temp
+    name: "Water Temperature"
+    id: water_temp
+    address: 0x180000007c68aa28   # in-pipe water probe ROM (captured from boot log 2026-07-13)
+    update_interval: 30s
+    entity_category: diagnostic
+    # Stamp freshness ONLY on a valid reading so a dead/NaN probe goes stale and
+    # the "Pool Temp Sensor Fault" diagnostic trips (mirrors the outdoor probe).
+    on_value:
+      - lambda: 'if (!isnan(x)) id(water_temp_seen) = millis();'
+
+  # Per-source water temperature: the single cell reading (water_temp) means a
+  # different thing depending on which suction diverter is selected. These hold
+  # the last settled reading for each source (published by the demux interval in
+  # logic.yaml, gated on pump running + cell powered + settle window elapsed).
+  - platform: template
+    name: "Spa Water Temperature"
+    id: spa_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: "mdi:hot-tub"
+  - platform: template
+    name: "Surface Water Temperature"
+    id: surface_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: "mdi:pool"
+  - platform: template
+    name: "Deep Water Temperature"
+    id: deep_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: "mdi:pool"
+
+  # Pentair IntelliFlo pump telemetry (firmware-derived component; unit,
+  # device_class, state_class and icon come from the platform defaults).
+  - platform: pentair
+    pump_id: pentair_pump
+    type: watts
+    name: "Pump Power"
+    id: pump_power
+    on_value:
+      - lambda: 'id(pump_rs485_seen) = millis();'
+  - platform: pentair
+    pump_id: pentair_pump
+    type: rpm
+    name: "Pump RPM"
+    id: pump_rpm
+    # Count consecutive rpm-stable telemetry samples for the holding loop. This
+    # has to run at TELEMETRY cadence, not on the 30s tick, so that the count is
+    # in the same units as pump_flow_avg's window -- requiring 15 here is
+    # exactly the guarantee that the averaging window does not straddle an rpm
+    # change and hand the loop a flow that never existed.
+    on_value:
+      - lambda: |-
+          id(holding_steady_n) = id(pool_ctrl).filter_steady_count(
+              x, id(holding_prev_rpm), id(holding_steady_n), 15.0f);
+          id(holding_prev_rpm) = x;
+  - platform: pentair
+    pump_id: pentair_pump
+    type: gpm
+    name: "Pump Flow"
+    id: pump_flow
+    # Fresh flow telemetry: re-evaluate the cell interlock the instant a new
+    # reading lands, so the cell is de-energised (or restored) without waiting
+    # for the periodic backstop.
+    on_value:
+      - script.execute: supervisor_apply
+
+  # Averaged flow for the holding loop ONLY. The raw sensor is deliberately left
+  # unfiltered: Filter Load and the flow_sweep tooling both need spot readings,
+  # and a lagged value there would misreport the baseline.
+  #
+  # Telemetry lands about every 2s, so 15 samples is roughly the 30s tick. The
+  # loop needs an average rather than a spot reading because the drive's GPM is
+  # a model estimate carrying up to ~0.5 GPM of noise -- a quarter of the whole
+  # deadband. (Averaging does NOT help at the operating points where the
+  # estimate is quantised and deterministic, e.g. 15.00 +-0.00 over 27 samples
+  # in the sweep; that is why the deadband stays at 1.0 GPM regardless.)
+  - platform: copy
+    source_id: pump_flow
+    id: pump_flow_avg
+    internal: true
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 5
+
+  # Pentair IntelliChlor telemetry
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: salt
+    name: "Salt Level"
+    id: salt_ppm
+    # Salt is returned on every cell poll, so it is the reliable cell heartbeat
+    # for the comms watchdog (the Plus60 may not report temp).
+    on_value:
+      - lambda: 'id(cell_rs485_seen) = millis();'
+
+  # --- Cell runtime meters ----------------------------------------------
+  # Generating hours = wall-clock time the cell was actively producing.
+  # Equivalent full-output hours weights each hour by output %, since the cell
+  # works harder at higher output (~ output% x time) — an hour at 20% counts
+  # far less than an hour at 100%. Both published from the accumulator globals
+  # maintained in logic.yaml.
+  - platform: template
+    name: "Cell Generating Hours"
+    id: cell_gen_hours_sensor
+    unit_of_measurement: "h"
+    state_class: total_increasing
+    accuracy_decimals: 1
+    icon: "mdi:timer-cog"
+    lambda: 'return id(cell_gen_hours);'
+  - platform: template
+    name: "Cell Full-Output Hours"
+    id: cell_equiv_hours_sensor
+    unit_of_measurement: "h"
+    state_class: total_increasing
+    accuracy_decimals: 1
+    icon: "mdi:timer-cog-outline"
+    lambda: 'return id(cell_equiv_hours);'
+
+  # Free chlorine imported from Home Assistant (logged in Pool Math).
+  - platform: homeassistant
+    id: fc_measured
+    entity_id: ${poolmath_fc_entity}
+    unit_of_measurement: "ppm"
+    on_value:
+      # Re-run the (debounced) auto-tune: this may be the input that was
+      # missing when the reading's timestamp arrived. See chlorine_update.
+      - script.execute: chlorine_update
+
+  # NOTE: the FC reading's timestamp is NOT here -- `last_updated` is an
+  # ISO-8601 string, which a numeric sensor cannot import. It lives in the
+  # text_sensor section below as fc_reading_ts_raw.
+
+  # CYA imported from Home Assistant (Pool Math) — drives the FC target.
+  - platform: homeassistant
+    id: cya_level
+    entity_id: ${poolmath_cya_entity}
+    unit_of_measurement: "ppm"
+
+  # FC target computed from CYA (TFP FC/CYA ratio). Recomputes as CYA
+  # drifts; used as the setpoint by the auto-tune. NaN if CYA missing.
+  - platform: template
+    name: "FC Target"
+    id: fc_target
+    unit_of_measurement: "ppm"
+    accuracy_decimals: 1
+    update_interval: 60s
+    lambda: |-
+      float t = id(pool_ctrl).fc_target_from_cya(
+          id(cya_level).state, id(fc_cya_ratio).state, 3.0f, 10.0f);
+      if (isnan(t)) return {};
+      return t;
+    on_value:
+      # Only fires with a REAL value (a NaN target returns {} and publishes
+      # nothing), so this is precisely "the target just became available" ->
+      # retry any reading that was skipped for want of it. Also re-fires every
+      # 60s poll, which just recomputes the same command.
+      - script.execute: chlorine_update
+
+  # --- Chlorine mass balance -------------------------------------------
+  # Demand measured rather than inferred: over a multi-day window,
+  #   demand = (ppm the cell produced - ppm FC gained) / days
+  # with production taken from the cell's OWN output-weighted hours, so pump
+  # downtime, comms loss and boost cycles are already folded in. Blank until
+  # two FC tests span the observer's minimum window (3 days).
+  - platform: template
+    name: "Chlorine Demand"
+    id: chlorine_demand
+    unit_of_measurement: "ppm/d"
+    accuracy_decimals: 2
+    icon: "mdi:water-minus"
+    update_interval: 60s
+    lambda: |-
+      float d = id(pool_ctrl).chlorine_demand();
+      if (isnan(d)) return {};
+      return d;
+  # The commanded output: learned demand plus the live FC gap. Equals what the
+  # cell is being set to unless boost or an alarm owns it.
+  - platform: template
+    name: "Suggested Chlorine Output"
+    id: chlorine_suggested
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:water-percent-alert"
+    update_interval: 60s
+    lambda: |-
+      float pct = id(pool_ctrl).mass_balance_pct(
+          id(fc_measured).state, id(fc_target).state, id(fc_tau_days).state,
+          id(pool_ctrl).ppm_per_equiv_hour(${cell_lb_per_day}, ${pool_gallons}),
+          ${cell_generating_hours}, 0.0f, 100.0f);
+      if (isnan(pct)) return {};
+      return pct;
+
+  # Filter loading indicator, on a 0 = clean / 100 = backwash it now axis.
+  # Holding flow constant, a loading filter needs MORE rpm for the same flow;
+  # "Filter Clean RPM Threshold" says how much more means dirty (default 120%
+  # of the clean baseline), and that becomes the 100% mark here. Above 100% is
+  # overdue. Press "Mark Filter Clean" (or Backwash / Rinse) to reset the
+  # baseline after servicing.
+  #
+  # Reported ONLY on the reference hydraulics: skimmer suction + pool-jet
+  # return. The idle holding pattern also rotates through the main drain, which
+  # needs ~20% more rpm for the same flow purely because of the valve position —
+  # comparing that against a skimmer-leg baseline would read as a badly loaded
+  # filter. Off the reference path the sensor goes unknown rather than lying.
+  - platform: template
+    name: "Filter Dirtiness"
+    id: filter_dirt_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      // NaN, not `return {}`. An empty optional means "publish nothing this
+      // cycle", which leaves the LAST VALID reading on screen indefinitely --
+      // so the sensor keeps showing a stale load taken under different
+      // hydraulics, which is precisely the lie this gate exists to prevent.
+      // Publishing NaN marks it unknown instead.
+      const float unknown = NAN;
+      if (!id(pool_ctrl).effective_is_pool_idle()) return unknown;   // only in Pool/Auto holding (fixed hydraulics)
+      if (!id(pool_ctrl).filter_reference_plumbing(
+              id(relay_valve1).state, id(relay_valve2).state,
+              id(relay_valve3).state, id(relay_valve4).state))
+        return unknown;
+      return id(pool_ctrl).filter_dirt_pct(
+          id(pool_ctrl).filter_load_pct(
+              id(pump_rpm).state, id(pump_flow).state,
+              id(filter_clean_rpm), id(filter_clean_flow)),
+          id(filter_clean_threshold_pct).state);
+
+
+binary_sensor:
+  # Pump running is derived from the pump's own decoded status (the firmware
+  # component has no dedicated "running" flag; running() reflects the latest
+  # pump status reply). on_state re-runs the cell interlock supervisor.
+  - platform: template
+    name: "Pump Running"
+    id: pump_running
+    device_class: running
+    lambda: 'return id(pentair_pump).running();'
+    on_state:
+      - script.execute: supervisor_apply
+  # Pump priming window (decoded from the pump status reply): the VSF reports
+  # this while spinning up before flow is established.
+  - platform: pentair
+    pump_id: pentair_pump
+    type: priming
+    name: "Pump Priming"
+    id: pump_priming
+  # Pump fault flag straight from the pump status word (device_class: problem).
+  # This aggregate is the single interlock signal the supervisor uses (booster
+  # dry-run cut). The per-fault breakout below is diagnostic detail.
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_alarm
+    name: "Pump Alarm"
+    id: pump_alarm
+  # Per-bit fault breakout of the pump alarm word (names verbatim from the VSF
+  # status packet). All diagnostic + device_class problem; each is set only when
+  # its bit is asserted, so "Pump Alarm" above tells you SOMETHING faulted and
+  # these tell you WHICH.
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_high_temp
+    name: "Pump High Temp"
+    id: pump_alarm_high_temp
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_prime_error
+    name: "Pump Prime Error"
+    id: pump_alarm_prime
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_over_temp
+    name: "Pump Over Temp"
+    id: pump_alarm_over_temp
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_power_error
+    name: "Pump Power Error"
+    id: pump_alarm_power
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_over_current
+    name: "Pump Over Current"
+    id: pump_alarm_over_current
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_over_voltage
+    name: "Pump Over Voltage"
+    id: pump_alarm_over_voltage
+  - platform: pentair
+    pump_id: pentair_pump
+    type: pump_unknown_alarm
+    name: "Pump Unknown Alarm"
+    id: pump_alarm_unknown
+  # Raw RS-485 bus presence (hub marks it stale after ~3 missed polls). This is
+  # distinct from "Pump Comms Lost" below: this is live connectivity (naturally
+  # off whenever the pump is unpowered), whereas Comms Lost is the powered-but-
+  # silent fault alarm.
+  - platform: pentair
+    pump_id: pentair_pump
+    type: comm
+    name: "Pump Connected"
+    id: pump_connected
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: no_flow
+    name: "No Flow"
+    id: alarm_no_flow
+    on_press:
+      - script.execute: supervisor_apply
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: low_salt
+    name: "Low Salt"
+    id: alarm_low_salt
+  # Firmware bit 2 is "very low salt" (njSPC mislabelled it "high salt").
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: very_low_salt
+    name: "Very Low Salt"
+    id: alarm_very_low_salt
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: clean_cell
+    name: "Inspect Cell"
+    id: alarm_cell_clean
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: cold_water
+    name: "Cell Water Too Cold"
+    id: alarm_cell_cold
+  # Raw RS-485 bus presence for the IntelliChlor (see "Pump Connected" note).
+  - platform: pentair
+    chlorinator_id: pentair_chlor
+    type: comm
+    name: "Chlorinator Connected"
+    id: chlorinator_connected
+
+  # Flags when the rpm needed to hold the reference flow has risen ABOVE the
+  # threshold % of the clean baseline (sustained 10 min to ignore transients).
+  # The threshold is already baked into the dirtiness rescale, so the trip is
+  # simply "dirtiness past full scale". Surface this in Home Assistant for a
+  # "clean filter" alert.
+  - platform: template
+    name: "Clean Filter Needed"
+    id: filter_clean_needed
+    lambda: |-
+      if (isnan(id(filter_dirt_pct).state)) return {};
+      return id(pool_ctrl).filter_clean_needed(id(filter_dirt_pct).state, 100.0f);
+    filters:
+      - delayed_on: 10min
+      - delayed_off: 10min
+
+  # Feedback for the deferred baseline capture: ON from the moment "Mark Filter
+  # Clean" is pressed until the reading is actually taken. Without this the arm
+  # is invisible and a capture that is still waiting on the reference plumbing
+  # looks identical to one that silently never happened.
+  - platform: template
+    name: "Filter Baseline Pending"
+    id: filter_baseline_pending
+    entity_category: diagnostic
+    lambda: "return id(filter_baseline_armed);"
+
+  # Holding loop gave up: it could not prove flow even at the drive's own 20 GPM
+  # floor, or tripped the flow switch repeatedly. The pump is parked back in
+  # flow mode (safe), so this is an attention flag, not an emergency -- but it
+  # means something physical is wrong (basket, diverter, impeller) rather than
+  # the rpm being slightly too low, since neither responds to more speed.
+  - platform: template
+    name: "Holding Loop Fault"
+    id: holding_loop_fault
+    entity_category: diagnostic
+    device_class: problem
+    lambda: "return id(pool_ctrl).holding_faulted();"
+
+  # --- RS485 comms watchdog -------------------------------------------
+  # Telemetry refreshes each ~30s poll. If a device's relay has been powered
+  # for longer than the grace window but we haven't heard from it, flag a comms
+  # fault (bus wiring, or a dead/hung device). Only asserted while the relevant
+  # relay is on, so an intentionally-off pump/cell never false-alarms.
+  - platform: template
+    name: "Pump Comms Lost"
+    id: comms_pump_lost
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      // Staleness decision lives in the host-tested core (comms_watchdog.h).
+      return id(pool_ctrl).comms_lost(millis(), id(pump_pwr_since),
+                                      id(pump_rs485_seen), 90000, 90000);
+    filters:
+      - delayed_on: 10s
+      - delayed_off: 10s
+    on_press:
+      - logger.log:
+          level: WARN
+          format: "RS485: pump telemetry lost (no response for >90s)"
+  - platform: template
+    name: "Chlorinator Comms Lost"
+    id: comms_cell_lost
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      // Cell power is now tied to the pump relay (OEM-style interlock), so the
+      // cell is expected on the bus whenever the pump is energised -- gate the
+      // staleness window on pump_pwr_since, not a dedicated cell-power stamp.
+      return id(pool_ctrl).comms_lost(millis(), id(pump_pwr_since),
+                                      id(cell_rs485_seen), 90000, 90000);
+    filters:
+      - delayed_on: 10s
+      - delayed_off: 10s
+    on_press:
+      - logger.log:
+          level: WARN
+          format: "RS485: chlorinator telemetry lost (no response for >90s)"
+
+  # --- Temperature sensor fail-safe watchdog --------------------------
+  # The outdoor probe drives freeze protection. If it stops returning fresh
+  # readings (dead probe, cut cable, or an un-pinned ROM address), freeze
+  # protection FAILS SAFE (forces circulation); this alarm surfaces WHY the pump
+  # is running so a silent probe fault can't hide. 5 min stale window (probe
+  # updates every 60s).
+  - platform: template
+    name: "Outdoor Temperature Sensor Fault"
+    id: sensor_fault_outdoor
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      // Staleness decision lives in the host-tested core (freeze_controller.h).
+      return id(pool_ctrl).temp_sensor_stale(millis(), id(outdoor_temp_seen), 300000);
+    filters:
+      - delayed_on: 10s
+      - delayed_off: 10s
+    on_press:
+      - logger.log:
+          level: WARN
+          format: "Freeze: outdoor probe unreadable >5min - protection running FAIL-SAFE"
+
+  # The in-pipe water probe is the authoritative water temp (chlorine temp-comp,
+  # per-source demux). If it stops returning fresh readings the dependent logic
+  # already NaN-guards, but this surfaces the silent fault. 5 min stale window
+  # (probe updates every 30s).
+  - platform: template
+    name: "Water Temperature Sensor Fault"
+    id: sensor_fault_water
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      return id(pool_ctrl).temp_sensor_stale(millis(), id(water_temp_seen), 300000);
+    filters:
+      - delayed_on: 10s
+      - delayed_off: 10s
+    on_press:
+      - logger.log:
+          level: WARN
+          format: "Water probe unreadable >5min - chlorine temp-comp/demux degraded"
+
+  # --- Mode-change lock indicator -------------------------------------
+  # True while the Mode picker is refused (a freeze holds the plumbing and we're
+  # not in Service Mode) -- i.e. exactly when may_change_mode() is false. The
+  # firmware can't disable the select entity itself, so this drives the HA
+  # dashboard: wrap the Mode card in a Conditional card (or card-mod) keyed on
+  # this being 'off' to hide/grey the picker while locked.
+  - platform: template
+    name: "Mode Locked"
+    id: mode_locked
+    icon: "mdi:lock"
+    entity_category: diagnostic
+    lambda: 'return !id(pool_ctrl).may_change_mode();'
+    filters:
+      - delayed_off: 2s
+
+
+text_sensor:
+  # Populated only by the logger's on_message hook (see pool-controller.yaml):
+  # the first WiFi warning of each outage, with the time and the RSSI at that
+  # moment. RAM-only, so a reboot clears it — acceptable because the failure
+  # mode we are chasing does not reboot the device. The running count persists.
+  - platform: template
+    name: "WiFi Last Disconnect"
+    id: wifi_last_drop
+    entity_category: diagnostic
+    update_interval: never
+    icon: "mdi:wifi-alert"
+
+  # Timestamp of the FC reading, from Pool Math's `last_updated` attribute. It
+  # advances on every new log even when the FC value is unchanged, so we trigger
+  # the auto-tune on THIS (not the value) and dedupe by it: exactly one apply per
+  # measurement, immune to reboots and to repeated identical readings.
+  #
+  # MUST be a text_sensor: HA sends "2026-07-26T13:06:58Z". As a numeric sensor
+  # this logged "Can't convert ... to number!" and published NaN, so every
+  # reading died on on_new_reading()'s first guard (SkipNoTimestamp) and the
+  # trim never left its 50% seed. Parsed to a float by iso8601.h in
+  # chlorine_update.
+  - platform: homeassistant
+    id: fc_reading_ts_raw
+    entity_id: ${poolmath_fc_entity}
+    attribute: last_updated
+    internal: true
+    on_value:
+      - script.execute: chlorine_update
+
+  # Arbitrated operating mode (freeze > cleaning > selected scene).
+  - platform: template
+    name: "Pool Mode"
+    id: pool_mode_text
+    icon: "mdi:pool"
+    lambda: 'return {id(pool_ctrl).effective_mode_name()};'
+    update_interval: 10s
+
+
+# =====================================================================
+# Cleaning lifecycle events. A proper HA "event" entity: each occurrence fires a
+# discrete, typed event (shown in the logbook and directly usable as an
+# automation trigger on `event_type`), so alerting on a cancelled/skipped clean
+# is a first-class typed event rather than substring-matching a text sensor.
+# Fired from the cleaning lifecycle in logic.yaml:
+#   completed          - the full AM/PM cycle finished
+#   cancelled_by_scene - a scene press pre-empted an IN-PROGRESS cycle (midway)
+#   skipped_scene      - a scheduled window was blocked by an active scene
+#   skipped_service    - blocked because Service Mode was on
+#   skipped_freeze     - blocked because freeze protection was active
+# HA automation: trigger on this entity, condition event_type in
+# [cancelled_by_scene, skipped_scene], then notify.
+# =====================================================================
+event:
+  - platform: template
+    name: "Cleaning Cycle Event"
+    id: cleaning_event
+    icon: "mdi:robot-vacuum-alert"
+    entity_category: diagnostic
+    event_types:
+      - "completed"
+      - "cancelled_by_scene"
+      - "cancelled_by_freeze"
+      - "skipped_scene"
+      - "skipped_service"
+      - "skipped_freeze"
+
+
+# =====================================================================
+# Buttons. Manual pump speed now lives in the diagnostic "Pump Flow Setpoint"
+# number (numbers.yaml), which energizes pump power then commands native flow.
+# =====================================================================
+button:
+  # --- Mode buttons (scene requests) ---------------------------------
+  # Each button REQUESTS a base mode. Unlike a dropdown a button holds no
+  # value, so it can never display a state the controller didn't honor: the
+  # press runs apply_scene, whose arbiter either applies it (service / normal),
+  # CANCELS an in-progress cleaning cycle to take over, or REJECTS it outright
+  # during freeze protection (logged, nothing changes). The read-only
+  # "Pool Mode" text sensor is the single source of truth for what is actually
+  # running (Freeze Protect / Cleaning / Service / the selected scene); the
+  # "Mode Locked" binary sensor shows when a request would be refused. On boot
+  # the persisted base mode is restored via apply_base_mode, independent of
+  # these momentary buttons.
+  - platform: template
+    name: "Pool"
+    icon: "mdi:pool"
+    on_press:
+      - script.execute: scene_pool
+
+  - platform: template
+    name: "Auto"
+    icon: "mdi:autorenew"
+    on_press:
+      - script.execute: scene_auto
+
+  - platform: template
+    name: "Spa"
+    icon: "mdi:hot-tub"
+    on_press:
+      - script.execute: scene_spa
+
+  - platform: template
+    name: "Spa Bubbles"
+    icon: "mdi:chart-bubble"
+    on_press:
+      - script.execute: scene_spa_bubbles
+
+  - platform: template
+    name: "Spillover"
+    icon: "mdi:waterfall"
+    on_press:
+      - script.execute: scene_spillover
+
+  - platform: template
+    name: "Fountains Low"
+    icon: "mdi:fountain"
+    on_press:
+      - script.execute: scene_fountains_low
+
+  - platform: template
+    name: "Fountains High"
+    icon: "mdi:fountain"
+    on_press:
+      - script.execute: scene_fountains_high
+
+  # --- Pump speed buttons ---
+  - platform: template
+    name: "Pump Stop"
+    entity_category: diagnostic
+    on_press:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            - lambda: 'id(pentair_pump).set_run(false);'
+          else:
+            - logger.log: "Pump Stop ignored: enable Service Mode to actuate"
+
+  # --- Chlorine auto-tune: re-run against the latest Pool Math FC ---
+  # Normally runs automatically when a new FC reading arrives; this button
+  # is a manual re-trigger (e.g. after a chlorinator alarm cleared).
+  - platform: template
+    name: "Apply Chlorine Reading"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: chlorine_update
+
+  # --- Filter maintenance: arm the clean-filter baseline capture ---
+  # This does NOT read anything now. Servicing the filter means the pump is off
+  # or the system is in Service Mode, so an immediate reading would be taken
+  # from exactly the conditions we must not baseline against. Pressing here
+  # arms the capture; the 10s tick in logic.yaml records the baseline once the
+  # equipment is genuinely back in the reference state and holding steady.
+  #
+  # Kept alongside Backwash / Rinse for the cleans that are not a backwash --
+  # a media change, or picking the sand over after opening the filter.
+  - platform: template
+    name: "Mark Filter Clean"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: arm_filter_baseline
+
+  # --- Filter maintenance: backwash / rinse ---
+  # One press = "run the filter at backwash flow AND expect it to be clean
+  # afterwards". Backwashing is the operation that actually cleans the sand
+  # bed, so re-baselining is implied by it; making the tech remember a second
+  # button is how Filter Load ends up quietly measured against a stale
+  # reference. Arming is deferred and harmless, so doing it on the FIRST press
+  # is right even though a backwash is normally followed by a rinse -- the
+  # second press just re-arms.
+  #
+  # Service-gated for the same reason as Pump Flow Setpoint: this is manual
+  # pump control and belongs to a tech with the automation suspended. That gate
+  # is also what stops a stray press from re-baselining during normal running.
+  #
+  # NOTE: the multiport valve is not instrumented, so this cannot verify you
+  # actually turned it to BACKWASH. Pressing it to vacuum to waste (which
+  # bypasses the filter and cleans nothing) would arm a baseline against a
+  # still-dirty filter, and a too-low baseline silently suppresses the clean-
+  # filter alarm rather than raising a false one. "Filter Baseline Pending" is
+  # on the dashboard so an unintended arm is visible before it fires.
+  # Named "or" rather than "/": a '/' in an entity name is reserved as a URL
+  # path separator, silently rewritten today and a hard error in ESPHome 2026.7.
+  # The dashboard overrides the label back to "Backwash / Rinse".
+  - platform: template
+    name: "Backwash or Rinse"
+    entity_category: diagnostic
+    icon: "mdi:water-sync"
+    on_press:
+      - if:
+          condition:
+            lambda: "return id(pool_ctrl).service_active();"
+          then:
+            # 60 GPM: high enough to lift and carry the bed on this filter, and
+            # the value this replaced on the dashboard.
+            - script.execute:
+                id: pump_run_flow
+                flow: 60.0
+            - script.execute: arm_filter_baseline
+          else:
+            - logger.log: "Backwash ignored: enable Service Mode to actuate"
+
+  # --- Run the daily cleaning cycle on demand ---
+  # Switch to the Auto base scene first, then start the cycle. Cleaning is gated
+  # on may_clean() (base_mode == AUTO and not service/freeze), so this makes the
+  # button work from any scene instead of silently skipping. scene_auto sets the
+  # base mode synchronously before cleaning_cycle re-checks it. Service/freeze
+  # still correctly block the clean (and scene_auto is itself rejected under freeze).
+  - platform: template
+    name: "Run Cleaning Cycle"
+    on_press:
+      - script.execute: scene_auto
+      - script.execute: cleaning_cycle

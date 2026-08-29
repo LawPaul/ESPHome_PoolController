@@ -1,0 +1,1222 @@
+
+# =====================================================================
+# Freeze protection + filter monitoring state (chlorine controller state
+# lives in the pool_control component, which persists it itself).
+# =====================================================================
+globals:
+  # --- Freeze protection + filter monitoring state ---
+  # Freeze override + selected base mode now live in the pool_control
+  # component (component-owned + persisted), so no freeze_active global here.
+  # Clean-filter baseline: the reference flow and the RPM needed to hold it
+  # when clean. Filter loading shows up as RPM rising above this baseline at
+  # the same flow.
+  - id: filter_clean_flow
+    type: float
+    restore_value: yes
+    initial_value: '-1'
+  - id: filter_clean_rpm
+    type: float
+    restore_value: yes
+    initial_value: '-1'
+
+  # "Mark Filter Clean" only ARMS a capture; the reading is taken later, from a
+  # verified steady state. Persisted so arming survives a reboot (or an OTA)
+  # that happens while the filter is still open. The settle trackers are
+  # deliberately NOT persisted — a reboot must restart the settle window.
+  - id: filter_baseline_armed
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: filter_settle_rpm
+    type: float
+    restore_value: no
+    initial_value: '-1'
+  - id: filter_settle_n
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # --- Valve-travel pump interlock (not persisted) ---
+  # pump_desired_flow: the steady-state flow the system wants (restore target).
+  # valve_motion_until: millis() deadline while a diverter is travelling; pump
+  # flow is clamped to valve_change_flow until then. This makes the dip apply to
+  # EVERY valve move regardless of source — mechanical protection is never
+  # suspended by service or freeze.
+  - id: pump_desired_flow
+    type: float
+    restore_value: no
+    initial_value: '0'
+  # pump_speed_mode: the idle holding scene can optionally drive the pump in
+  # SPEED (rpm) mode instead of FLOW (gpm) mode, because the IntelliFlo's flow
+  # mode floors at 20 GPM while speed mode reaches 450 rpm. When set, the restore
+  # target is re-resolved from the live suction path by holding_rpm_apply rather
+  # than read from pump_desired_flow, which is parked at 0.
+  - id: pump_speed_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Holding-loop settle gate: consecutive rpm-stable telemetry samples, counted
+  # in pump_rpm's on_value. Deliberately NOT persisted -- after a reboot the
+  # loop must re-establish from scratch rather than trust a stale window.
+  - id: holding_steady_n
+    type: uint16_t
+    restore_value: no
+    initial_value: '0'
+  - id: holding_prev_rpm
+    type: float
+    restore_value: no
+    initial_value: '0'
+  # pump_desired_rpm: the rpm counterpart of pump_desired_flow -- the speed the
+  # controller last COMMANDED (not the speed the pump reports). Backs the RPM
+  # setpoint slider so it can only ever display a value we actually sent.
+  - id: pump_desired_rpm
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: valve_motion_until
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # valve_stop_window: set by relay_valve4's triggers when the FOUNTAIN diverter
+  # moves, which needs the pump stopped outright rather than dipped to the creep
+  # (see valve_travel_action). Read by pump_run_flow/pump_run_rpm so a setpoint
+  # that lands mid-travel is held at zero too; cleared by the guard's restore.
+  - id: valve_stop_window
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # millis() when the WiFi link was first seen down (0 = up). Drives the
+  # self-heal reboot; not persisted, so a reboot always starts the count fresh.
+  - id: wifi_down_since
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # WiFi disconnect forensics. The ESP-IDF disconnect REASON exists only as a
+  # log line and ESPHome keeps no history, so an outage that ends hours later
+  # takes its own cause with it. wifi_drop_latched makes us keep the FIRST
+  # warning of an outage (the one that says why) instead of the thousandth
+  # retry failure; it is cleared on reconnect. The count persists so a
+  # self-heal reboot doesn't reset the tally.
+  - id: wifi_drop_latched
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: wifi_drop_count
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  # --- Cleaning-cycle state machine (not persisted; deadline-driven) ---
+  # clean_start_ms: millis() when the cycle began (0 = not running). The pure
+  # core (cleaning_phase.h) turns "now - start" into the current phase, so the
+  # choreography is a tick-driven state machine instead of a chain of blocking
+  # delays. clean_phase_applied: the phase whose plumbing has already been set,
+  # for edge-triggered actuation (only act on transitions).
+  - id: clean_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: clean_phase_applied
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Per-tick scratch written by clean_tick's decision lambda, read by the
+  # actuation branches below it in the same script.
+  - id: clean_phase_now
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: clean_booster_now
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Scratch: set by apply_scene's arbitration lambda to tell the actuation
+  # branch whether the scene won ownership (true) or was rejected (false).
+  - id: scene_apply_now
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Scratch: set by the freeze interval so the actuation step only invokes
+  # apply_plumbing_now when freeze is the writer this tick (owns the rotation or
+  # is releasing it), never fighting the idle holding-pattern valve rotation.
+  - id: freeze_replumb
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Gate for the flow-number on_value live re-apply: false until the on_boot
+  # sequence has finished its startup delay and applied the base mode, so the
+  # restored numbers publishing at setup don't drive the pump before the relay
+  # expander and pump RS485 are up.
+  - id: booted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # millis() when the current freeze spell engaged (0 = not in one). Feeds the
+  # minimum run-on: freeze holds until temp clears AND now-freeze_start_ms >=
+  # freeze_min_runtime_min. Not persisted (a reboot re-evaluates temp fresh).
+  - id: freeze_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # --- RS485 comms watchdog state (not persisted; all millis timestamps) ---
+  # *_rs485_seen: last time telemetry from that device was published.
+  # *_pwr_since:  when that device's relay was last energised (0 = off), so the
+  #               watchdog only expects a response while the device has power.
+  - id: pump_rs485_seen
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: cell_rs485_seen
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: pump_pwr_since
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Last time the outdoor probe returned a VALID (non-NaN) reading. Stays 0 until
+  # the first good read, so an un-pinned/dead probe reads stale and freeze
+  # protection fails safe. Advanced by the outdoor_temp on_value in entities.yaml.
+  - id: outdoor_temp_seen
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Last time the in-pipe water probe returned a VALID (non-NaN) reading. Stays 0
+  # until the first good read; drives the "Pool Temp Sensor Fault" diagnostic.
+  # Advanced by the water_temp on_value in entities.yaml.
+  - id: water_temp_seen
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # --- Per-source suction temperature demux state (not persisted) ---
+  # suction_source: last observed source (-1 unknown, 0 skimmer, 1 drain, 2 spa)
+  # suction_changed_ms: millis() when the source last changed (settle timer base)
+  - id: suction_source
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: suction_changed_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # --- Salt cell runtime accumulators (persisted; hours) ---
+  # cell_gen_hours: wall-clock hours the cell was actively generating.
+  # cell_equiv_hours: output-weighted (equivalent full-output) hours, since the
+  # cell works harder at higher output (~ output% x time).
+  - id: cell_gen_hours
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: cell_equiv_hours
+    type: float
+    restore_value: yes
+    initial_value: '0'
+
+
+# =====================================================================
+# Safety interlocks:
+#  * Salt cell (PC100/Plus60): powered from the LOAD side of the pump's G7L#1
+#    power relay (OEM-style relay interlock, per the IntelliCenter/IntelliChlor
+#    install guides), so it is physically dead whenever the pump is off. The
+#    pentair hub additionally commands 0% output while the pump isn't running,
+#    and the cell's own flow sensor stops production without adequate flow.
+#    supervisor_apply no longer switches cell power -- it only annunciates.
+#  * Booster (Polaris): may never run dry -- guarded mechanically by the
+#    always-on `supervisor_apply` (below) plus the cleaning turn-on gate.
+# Both are service-independent: service mode suspends automation, never an
+# interlock.
+# =====================================================================
+interval:
+  # WiFi self-heal. ESPHome's own `wifi: reboot_timeout:` is INERT here: its
+  # loop guards it with `if (!this->has_ap() && ...)`, so configuring a fallback
+  # `ap:` (we do, for captive-portal recovery) disables it outright. And once
+  # the fallback AP starts, the wifi component stops scanning, so a wedged STA
+  # never recovers on its own -- the pad silently drops off the network until
+  # someone power-cycles it.
+  #
+  # This keys on WIFI, not on the API, which is the distinction the api-side
+  # timeout could not make: a Home Assistant outage must NOT cycle the pad (the
+  # pool runs standalone by design, api reboot_timeout stays 0), but a link that
+  # has been down for wifi_recover_min genuinely is wedged and only a reboot
+  # clears it. 0 disables. Relays return to their scene ~15 s after boot via
+  # on_boot -> apply_base_mode, so an hourly-at-worst reboot is cheap.
+  - interval: 60s
+    then:
+      - lambda: |-
+          const uint32_t limit = (uint32_t) (id(wifi_recover_min).state * 60000.0f);
+          if (esphome::wifi::global_wifi_component->is_connected()) {
+            id(wifi_down_since) = 0;
+            return;
+          }
+          if (limit == 0) return;
+          if (id(wifi_down_since) == 0) {
+            id(wifi_down_since) = millis();
+            ESP_LOGW("wifi", "Link down; will reboot if it stays down %.0f min",
+                     id(wifi_recover_min).state);
+            return;
+          }
+          if (millis() - id(wifi_down_since) > limit) {
+            ESP_LOGE("wifi", "Link down %.0f min; rebooting to recover",
+                     id(wifi_recover_min).state);
+            id(wifi_down_since) = 0;
+            App.safe_reboot();
+          }
+
+  # Always-on supervisor: the flow-proven cell interlock, the booster dry-run
+  # guard and the status LED, re-evaluated every 2 s. The cell interlock is also
+  # driven by event triggers (pump flow / running / no-flow alarm / enable
+  # switch) for instant reaction; this backstop catches any missed/stale event
+  # and keeps the LED reflecting live state.
+  - interval: 2s
+    then:
+      - script.execute: supervisor_apply
+
+  # Cleaning-cycle tick: drives the four-phase choreography from the pure
+  # deadline core (cleaning_phase.h) instead of blocking `delay:` chains, so the
+  # phase boundaries + booster prime-window are host-tested. No-op while the
+  # cycle isn't running (clean_start_ms == 0).
+  - interval: 1s
+    then:
+      - script.execute: clean_tick
+
+  # Per-source water temperature demux: the water_temp probe reads whichever
+  # suction diverter is selected (valve1 ON=spa; else valve2 ON=main drain; else
+  # skimmer). Route it into spa/deep/surface holders, but only once the pump is
+  # running and enough water has flushed past the probe for the reading to be
+  # representative (settle volume `temp_settle_gal` / live flow -- see
+  # settle_ms_for_gallons, so a slower pump waits proportionally longer).
+  - interval: 5s
+    then:
+      - lambda: |-
+          int src = id(pool_ctrl).suction_source(
+              id(relay_valve1).state, id(relay_valve2).state);
+          if (src != id(suction_source)) {            // just switched: restart settle
+            id(suction_source) = src;
+            id(suction_changed_ms) = millis();
+            return;
+          }
+          if (!id(pump_running).state) return;                 // no flow -> no source
+          if (isnan(id(water_temp).state)) return;             // DS18B20 not ready
+          uint32_t settle = id(pool_ctrl).settle_ms_for_gallons(
+              id(temp_settle_gal).state, id(pump_flow).state);
+          if (!id(pool_ctrl).suction_settled(millis(), id(suction_changed_ms), settle))
+            return;
+          float t = id(water_temp).state;
+          switch (src) {
+            case 2: id(spa_temp).publish_state(t); break;      // spa
+            case 1: id(deep_temp).publish_state(t); break;     // main drain (deep)
+            default: id(surface_temp).publish_state(t); break; // skimmer (surface)
+          }
+
+  # Salt cell runtime meter: while the cell is actually generating (pump running
+  # so the cell has power, commanded output > 0, and the cell is answering on
+  # the RS485 bus), accrue runtime. If the cell is disconnected/unresponsive
+  # (comms_cell_lost), it is not producing regardless of commanded output, so
+  # the meter must pause -- otherwise wear hours climb while nothing is made.
+  # cell_equiv_hours is weighted by the output %, so it reflects how HARD the
+  # cell ran, not just how long.
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_on: pump_running
+              - binary_sensor.is_off: comms_cell_lost
+              - lambda: 'return id(chlorine_output).state > 0.0f;'
+          then:
+            - lambda: |-
+                // Output-weighted runtime accounting lives in the host-tested
+                // core (cell_wear.h); accumulate its deltas into the globals.
+                auto w = id(pool_ctrl).cell_wear_step(id(chlorine_output).state, 60.0f);
+                id(cell_gen_hours)   += w.gen_delta_h;
+                id(cell_equiv_hours) += w.equiv_delta_h;
+
+  # Holding pattern: while the pool is idle (effective mode = Pool or Auto), keep
+  # the IntelliChlor fed with low-speed circulation and rotate suction to the main drain
+  # for `holding_drain_min` at the start of every `holding_drain_period_h` hours
+  # so the deep end turns over. Only touches valve2 on a change (low actuator
+  # wear); yields entirely to freeze / cleaning / spa / spillover / fountains.
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            # Pool and Auto share the idle-pool hydraulics; see PoolMode enum.
+            lambda: 'return id(pool_ctrl).effective_is_pool_idle();'
+          then:
+            - lambda: |-
+                auto now = id(sntp_time).now();
+                if (!now.is_valid()) return;
+                int sod = now.hour * 3600 + now.minute * 60 + now.second;
+                int period_s = (int) lroundf(id(holding_drain_period_h).state * 3600.0f);
+                int drain_s  = (int) lroundf(id(holding_drain_min).state * 60.0f);
+                bool want_drain = id(pool_ctrl).holding_drain_now(sod, period_s, drain_s);
+                if (id(relay_valve2).state != want_drain) {
+                  ESP_LOGI("holding", "Suction -> %s", want_drain ? "main drain" : "skimmer");
+                  if (want_drain) id(relay_valve2).turn_on();
+                  else            id(relay_valve2).turn_off();
+                }
+
+  # Re-apply every 15 min so the live sun response tracks the current
+  # rolling-24h insolation through the day (and re-asserts the setpoint if
+  # the IntelliChlor output % is changed externally). Trim updates only on FC readings.
+  - interval: 15min
+    then:
+      - script.execute: chlorine_apply
+
+  # Closed-loop holding flow. The IntelliFlo3 clamps FLOW-mode setpoints to
+  # 20 GPM, so holding below that means rpm mode -- which is open-loop, and
+  # would let a loading filter quietly starve the salt cell. This tick puts the
+  # flow target back in charge by trimming rpm; the decision logic is entirely
+  # in holding_flow.h and host-tested.
+  #
+  # 30s cadence: fast enough that a real disturbance is corrected within a few
+  # minutes, slow enough that each decision rests on a settled average. In
+  # steady state the deadband means this actuates roughly once a fortnight.
+  #
+  # Standing down when `holding_rpm_mode` is on leaves the older fixed-rpm path
+  # as an escape hatch; the two must never both drive the pump.
+  - interval: 30s
+    then:
+      - lambda: |-
+          bool idle = id(pool_ctrl).effective_is_pool_idle() &&
+                      !id(holding_rpm_mode).state;
+          auto out = id(pool_ctrl).holding_tick(
+              millis(), idle, id(pentair_pump).running(),
+              id(holding_flow).state, id(pump_flow_avg).state,
+              id(pump_rpm).state, id(alarm_no_flow).state,
+              id(holding_steady_n));
+
+          if (!out.actuate) return;
+          if (out.mode == esphome::pool_control::HoldingFlowController::Mode::Flow) {
+            ESP_LOGI("holding", "Loop -> flow %.1f GPM (phase %d)",
+                     out.setpoint, (int) out.phase);
+            id(pump_run_flow)->execute(out.setpoint);
+          } else {
+            ESP_LOGI("holding", "Loop -> %.0f rpm (phase %d, flow %.1f)",
+                     out.setpoint, (int) out.phase, id(pump_flow_avg).state);
+            id(pump_run_rpm)->execute(out.setpoint);
+          }
+          // Our own command invalidates the settle window.
+          id(holding_steady_n) = 0;
+
+  # Deferred clean-filter baseline capture. The button only arms this; here we
+  # wait for the equipment to actually be back in the reference state before
+  # recording anything. That is what lets a technician press "Mark Filter Clean"
+  # while still in Service Mode with the lid off: the baseline is taken once
+  # service ends, the holding pattern resumes on skimmer suction + pool-jet
+  # return, and the rpm has stopped moving — not from whatever transient
+  # happened to be on screen at the moment of the press.
+  #
+  # 25 rpm tolerance over 12 consecutive 10s samples = ~2 min of genuinely
+  # steady running. That comfortably outlasts valve travel and the pump ramp --
+  # but the binding constraint is now the holding loop, which steps rpm every
+  # 30-60s while it converges. Requiring longer than its step cadence is what
+  # forces the capture to wait for the loop to actually SETTLE; at 6 samples it
+  # was a coin flip whether the baseline got taken mid-descent, which would
+  # record a wrong rpm/flow pair and leave Filter Load wrong indefinitely.
+  #
+  # Stillness is necessary but NOT sufficient, hence the loop's own verdict as
+  # well. This works in both holding modes: plain flow mode (target >= 20, or
+  # the fixed-rpm escape hatch) leaves the loop Off and permits the capture
+  # exactly as before, while a sub-20 target permits it only once the loop has
+  # reached Hold. What it excludes is the establishment plateau, which is 20 GPM
+  # and rock steady for minutes -- indistinguishable from a settled system by
+  # stillness alone, and poisonous as a baseline.
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (!id(filter_baseline_armed)) {
+            id(filter_settle_n) = 0;
+            id(filter_settle_rpm) = -1.0f;
+            return;
+          }
+          const float rpm = id(pump_rpm).state;
+          const float flow = id(pump_flow).state;
+          const bool ref = id(pool_ctrl).filter_reference_plumbing(
+              id(relay_valve1).state, id(relay_valve2).state,
+              id(relay_valve3).state, id(relay_valve4).state);
+          id(filter_settle_n) = id(pool_ctrl).filter_steady_count(
+              rpm, id(filter_settle_rpm),
+              static_cast<uint16_t>(id(filter_settle_n)), 25.0f);
+          id(filter_settle_rpm) = rpm;
+          if (!id(pool_ctrl).filter_capture_ready(
+                  true, id(pump_running).state,
+                  id(pool_ctrl).effective_is_pool_idle(), ref,
+                  id(pool_ctrl).holding_settled_for_baseline(), rpm, flow,
+                  static_cast<uint16_t>(id(filter_settle_n)), 12))
+            return;
+          id(filter_clean_flow) = flow;
+          id(filter_clean_rpm) = rpm;
+          id(filter_baseline_armed) = false;
+          id(filter_settle_n) = 0;
+          ESP_LOGI("filter", "Clean baseline captured: %.0f rpm holds %.1f gpm",
+                   rpm, flow);
+
+  # Freeze protection: below the threshold, force the pump to circulate and
+  # rotate through the exposed loops so no plumbing sits static. The hysteresis
+  # + rotation-phase math live in the pool_control component (freeze_controller.h,
+  # host-tested); this lambda only marshals sensors and actuates relays. Takes
+  # priority over scenes and the cleaning cycle (arbitration: freeze > cleaning
+  # > base scene).
+  - interval: 60s
+    then:
+      - lambda: |-
+          id(freeze_replumb) = false;
+          float t = id(outdoor_temp).state;
+          bool was = id(pool_ctrl).freeze_active();
+          // Service mode owns the equipment: suspend freeze so the technician
+          // keeps manual control (this is what lets modes change).
+          if (id(pool_ctrl).service_active()) {
+            if (was) {
+              id(pool_ctrl).set_freeze(false);
+              ESP_LOGW("freeze", "Service mode active: freeze protection suspended");
+            }
+            return;
+          }
+          auto now = id(sntp_time).now();
+          int sod = now.is_valid() ? now.hour * 3600 + now.minute * 60 + now.second : 0;
+          int rot = (int) lroundf(id(freeze_rotate_min).state * 60.0f);
+          // FAIL SAFE: a NaN/stale outdoor reading (dead probe, cut cable, or an
+          // un-pinned ROM address) means we cannot prove it is warm. Rather than
+          // skip the tick and risk a burst pipe, protect anyway — force
+          // circulation + loop rotation — and let the sensor-fault alarm say why.
+          bool failed = id(pool_ctrl).temp_sensor_stale(millis(), id(outdoor_temp_seen), 300000);
+          uint32_t felapsed = was ? (millis() - id(freeze_start_ms)) : 0;
+          uint32_t minrt = (uint32_t) (id(freeze_min_runtime_min).state * 60000.0f);
+          auto d = failed
+              ? id(pool_ctrl).freeze_failsafe(id(freeze_threshold_c).state, 1.0f,
+                                              sod, rot, id(normal_flow).state)
+              : id(pool_ctrl).freeze_tick(t, id(freeze_threshold_c).state, 1.0f,
+                                          sod, rot, id(normal_flow).state,
+                                          felapsed, minrt);
+          if (failed && d.entered)
+            ESP_LOGW("freeze", "Outdoor probe unreadable -> FAIL-SAFE freeze circulation");
+          if (d.entered) {
+            id(pool_ctrl).set_freeze(true);
+            id(freeze_start_ms) = millis();   // start the minimum run-on clock
+            id(relay_booster).turn_off();   // protect the Polaris during freeze
+            // Freeze is a hard override: cancel any in-progress cleaning cycle
+            // outright (freeze > cleaning) and run pure freeze protection. The
+            // cancelled clean is NOT resumed; it reruns at the next scheduled
+            // window (may_clean gated).
+            if (id(pool_ctrl).cleaning_active()) {
+              id(pool_ctrl).set_cleaning_active(false);
+              id(clean_start_ms) = 0;
+              id(clean_phase_applied) = 0;
+              id(cleaning_event).trigger("cancelled_by_freeze");
+              ESP_LOGW("freeze", "Cleaning cycle cancelled by freeze protection");
+            }
+            ESP_LOGW("freeze", "Freeze ON (%.1fC): forcing %.1f gpm", t, d.forced_flow);
+          }
+          if (d.exited) {
+            id(pool_ctrl).set_freeze(false);
+            ESP_LOGI("freeze", "Freeze OFF (%.1fC): resuming owner", t);
+          }
+          // Actuation is delegated to the single arbiter-driven actuator: while
+          // freeze owns the plumbing it re-resolves the rotation targets +
+          // forced flow; on release it re-resolves whoever owns next (cleaning
+          // or the base scene). Only invoke it when freeze is the writer this
+          // tick so we never fight the idle holding-pattern valve rotation.
+          id(freeze_replumb) = d.active || d.exited;
+      - if:
+          condition:
+            lambda: 'return id(freeze_replumb);'
+          then:
+            - script.execute: apply_plumbing_now
+
+
+script:
+  # Valve-travel pump interlock. Fired by every valve relay's on_turn_on /
+  # on_turn_off, so ANY diverter movement — scene, freeze rotation, cleaning
+  # phase, or a manual/service toggle — dips the pump to the low valve-change
+  # creep for the travel window, then restores the steady-state target. This is
+  # mechanical protection (gear wear, surge, dead-head) and is deliberately NOT
+  # suspended by service or freeze, unlike the freeze/chlorine automation.
+  #
+  # Speed (rpm) mode is exempt from the DIP — not from the guard. The rpm-mode
+  # path exists only to run the idle holding scene BELOW the 20 GPM flow-mode
+  # floor, so the pump is already slower than the valve-change creep; dipping
+  # would mean commanding a GPM setpoint at a pump that is in rpm mode. The
+  # restore leg still runs (via pump_restore) so the mode-correct steady-state
+  # target is re-asserted after travel.
+  #
+  # The FOUNTAIN diverter is the exception: reduced flow is exactly the failure
+  # mode there (the arcing jets fall short of the water and wet the deck), so
+  # its move gets a full stop for the window instead. relay_valve4 raises
+  # valve_stop_window before firing the guard; valve_travel_action decides.
+  # A stop is safe for the salt cell — pump POWER stays on, only the drive is
+  # stopped, so the cell simply sees its flow switch open and stands down.
+  - id: valve_travel_guard
+    mode: restart
+    then:
+      - lambda: |-
+          id(valve_motion_until) = millis() + (uint32_t) (id(valve_delay_s).state * 1000.0f);
+          auto action = id(pool_ctrl).valve_travel_action(
+              id(valve_stop_window), id(relay_pump_power).state, id(pump_speed_mode),
+              id(pump_desired_flow), id(valve_change_flow).state, id(valve_delay_s).state);
+          switch (action) {
+            case esphome::pool_control::TravelAction::STOP:
+              ESP_LOGI("valve", "Fountain valve travel: stopping pump for %.0f s",
+                       id(valve_delay_s).state);
+              id(pentair_pump).set_run(false);
+              break;
+            case esphome::pool_control::TravelAction::CREEP:
+              ESP_LOGI("valve", "Valve travel: dipping pump to %.1f gpm",
+                       id(valve_change_flow).state);
+              id(pentair_pump).set_target(id(pool_ctrl).flow_to_cmd(id(valve_change_flow).state));
+              id(pentair_pump).set_run(true);
+              break;
+            case esphome::pool_control::TravelAction::RUN:
+              // Guard disabled or pump already stopped: no window to enforce.
+              id(valve_stop_window) = false;
+              break;
+          }
+      - delay: !lambda 'return (uint32_t) (id(valve_delay_s).state * 1000.0f);'
+      # Window has now expired: drop the stop flag BEFORE restoring, or the
+      # restore's own setpoint command would be held at zero by itself.
+      - lambda: 'id(valve_stop_window) = false;'
+      # Restore the steady-state target (window has now expired, so no clamp).
+      - if:
+          condition:
+            lambda: |-
+              return id(relay_pump_power).state &&
+                     (id(pump_speed_mode) || id(pump_desired_flow) > 0.0f);
+          then:
+            - script.execute: pump_restore
+
+  # Always-on supervisor: the continuously-evaluated protections + annunciation.
+  # The decision (which are mechanical interlocks and therefore SERVICE-
+  # INDEPENDENT) lives in the host-tested core (supervisor.h); this lambda only
+  # reads live state and actuates. Drives the booster dry-run guard and the
+  # status LED, and annunciates cell faults. (Cell power is no longer switched
+  # here -- it is tied to the pump relay and flow-gated by the pentair hub.)
+  # Run on every relevant event and by the 2 s backstop interval.
+  - id: supervisor_apply
+    mode: single
+    then:
+      - lambda: |-
+          bool  comms = id(comms_pump_lost).state || id(comms_cell_lost).state;
+          // The firmware-correct chlorinator only decodes no-flow, (very) low
+          // salt, clean-cell and cold-water flags; the njSPC-era PCB/current/
+          // voltage flags were not real, so they no longer feed the annunciator.
+          bool  alarm = id(alarm_no_flow).state;
+          bool  warn  = id(alarm_low_salt).state || id(alarm_very_low_salt).state ||
+                        id(alarm_cell_cold).state || id(alarm_cell_clean).state ||
+                        id(filter_clean_needed).state;
+          auto out = id(pool_ctrl).supervise(
+              id(pump_running).state, id(pump_priming).state, id(pump_alarm).state,
+              id(pool_ctrl).service_active(), id(pool_ctrl).freeze_active(),
+              id(pool_ctrl).cleaning_active(), id(pool_ctrl).boost_active(),
+              comms, alarm, warn);
+
+          // 1) Salt cell — power is now the pump relay (OEM-style interlock) and
+          // the pentair hub commands 0% output whenever the pump isn't running,
+          // so there is no cell relay to switch here. A dry cell is impossible:
+          // no pump power -> no cell power, and no pump running -> hub-commanded
+          // 0% plus the cell's own flow sensor.
+
+          // 2) Booster (Polaris) — never run dry (service-independent): cut it
+          // if the pump stops, is only priming (no proven flow yet), or faults.
+          if (!out.booster_permit && id(relay_booster).state) {
+            id(relay_booster).turn_off();
+            ESP_LOGW("booster", "Cutting booster: run=%d priming=%d alarm=%d",
+                     id(pump_running).state, id(pump_priming).state,
+                     id(pump_alarm).state);
+          }
+
+          // 3) Status LED — map the annunciation state to colour + brightness.
+          float r = 0, g = 1, b = 0, bright = 0.10f;   // healthy: green
+          switch (out.status_led) {
+            case 1: r = 0;    g = 0;    b = 1;                 break;  // service: blue
+            case 2: r = 1;    g = 1;    b = 1; bright = 0.25f; break;  // comms: white
+            case 3: r = 1;    g = 0;    b = 0; bright = 0.25f; break;  // alarm: red
+            case 4: r = 0;    g = 0.6f; b = 1;                 break;  // freeze: cyan
+            case 5: r = 0.5f; g = 0;    b = 1;                 break;  // cleaning: purple
+            case 6: r = 1;    g = 0.4f; b = 0;                 break;  // boost: orange
+            case 7: r = 1;    g = 0.8f; b = 0;                 break;  // warn: yellow
+          }
+          auto call = id(status_led).turn_on();
+          call.set_rgb(r, g, b);
+          call.set_brightness(bright);
+          call.set_transition_length(300);
+          call.perform();
+
+  # Chlorine mass balance. The math + learned state live in the pool_control
+  # external component (components/pool_control, unit-tested in tests/); these
+  # scripts just marshal the current sensor values into it.
+  #   demand  = (ppm the cell produced - ppm FC gained) / days, measured from
+  #             the cell's own output-weighted hours
+  #   out     = (demand + (target - FC)/tau) / production-per-percent
+  # The command is ABSOLUTE, not a step from the last output: FC is a level and
+  # output is a rate, so integrating the error would integrate the plant twice.
+  #
+  # DEBOUNCED (restart + leading delay) because the inputs arrive as several
+  # INDEPENDENT Home Assistant subscriptions that land in arbitrary order, tens
+  # of ms apart. Two real failures came from that:
+  #   - at boot the timestamp arrived 24 ms before FC/CYA, so the reading was
+  #     dropped for want of data and nothing retried it until the next test;
+  #   - a new reading whose timestamp beat its value was evaluated against the
+  #     PREVIOUS FC number.
+  # Restarting on every input means a burst collapses into ONE evaluation, run
+  # once the dust has settled. Triggered from fc_reading_ts_raw (new reading),
+  # fc_measured and fc_target (late-arriving inputs -> retry); duplicates are
+  # harmless, the observer dedupes on the timestamp.
+  - id: chlorine_update
+    mode: restart
+    then:
+      - delay: 3s
+      - lambda: |-
+          // Service stands chlorine automation down (single policy accessor): a
+          // technician has manual control, so don't move the cell underneath
+          // them. The reading is simply dropped and resumes when service ends.
+          if (id(pool_ctrl).chlorine_suspended()) return;
+          bool alarm = id(alarm_no_flow).state || id(alarm_low_salt).state;
+          // last_updated is an ISO-8601 string; parse it to a comparable float
+          // (NaN if HA sent 'unknown'/'unavailable'). See iso8601.h.
+          float ts = id(pool_ctrl).parse_reading_ts(id(fc_reading_ts_raw).state);
+          // Deliberately NOT gated on alarm/boost/cold water: production is read
+          // from the cell's own equivalent hours, so those states are already
+          // accounted for rather than excluded.
+          id(pool_ctrl).observe_demand(
+              ts,
+              id(fc_measured).state,
+              id(cell_equiv_hours),
+              id(pool_ctrl).ppm_per_equiv_hour(${cell_lb_per_day}, ${pool_gallons}));
+          id(pool_ctrl).apply_mass_balance(
+              id(fc_measured).state, id(fc_target).state, alarm,
+              id(fc_tau_days).state,
+              id(pool_ctrl).ppm_per_equiv_hour(${cell_lb_per_day}, ${pool_gallons}),
+              ${cell_generating_hours}, 0.0f, 100.0f);
+
+  # Re-push the output. Re-run periodically so the setpoint is re-asserted if
+  # the IntelliChlor output % is changed externally.
+  - id: chlorine_apply
+    mode: single
+    then:
+      - lambda: |-
+          // Suspended in service (see chlorine_update): hold the current setpoint
+          // rather than re-asserting it while the technician owns the equipment.
+          if (id(pool_ctrl).chlorine_suspended()) return;
+          bool alarm = id(alarm_no_flow).state || id(alarm_low_salt).state;
+          id(pool_ctrl).apply_mass_balance(
+              id(fc_measured).state, id(fc_target).state, alarm,
+              id(fc_tau_days).state,
+              id(pool_ctrl).ppm_per_equiv_hour(${cell_lb_per_day}, ${pool_gallons}),
+              ${cell_generating_hours}, 0.0f, 100.0f);
+
+  # Pentair-style super-chlorinate: hold boost_percent (100%) for
+  # boost_hours (24h), then hand control back to the auto loop.
+  - id: chlorine_boost
+    mode: restart
+    then:
+      - lambda: 'id(pool_ctrl).set_boost_active(true);'
+      - lambda: 'id(pool_ctrl).set_output_direct(id(boost_percent).state);'
+      - delay: !lambda 'return id(boost_hours).state * 3600000.0;'
+      - lambda: 'id(pool_ctrl).set_boost_active(false);'
+      - script.execute: chlorine_apply
+
+  # Set pump FLOW with the comms interlock (power on -> settle -> command).
+  # The IntelliFlo's native flow mode then holds this GPM by trimming its
+  # own RPM. Callable with a parameter so freeze + cleaning share one path.
+  # Command unit is a single byte of native GPM, so the ceiling is 255 GPM.
+  # NOTE: if the IntelliFlo3 rejects the flow command (subcmd 0x09), swap
+  # this body for commandRPM + a slow flow-trim loop on pump_flow feedback.
+  # Bring the pad to a known state when Service Mode is entered: pump stopped,
+  # booster and blower off, cell output zeroed. Service otherwise only stops
+  # COMMANDING equipment -- whatever was already running would keep running
+  # while someone has hands on the plumbing.
+  #
+  # Pump POWER is deliberately left alone: the drive is stopped over RS485, not
+  # de-energised, so it keeps talking (telemetry and the comms watchdog stay
+  # meaningful) and the tech restarts it without hunting for a relay.
+  #
+  # Nothing here is sticky: leaving Service runs apply_base_mode + chlorine_apply,
+  # which re-resolve the plumbing and recompute the cell setpoint from scratch.
+  - id: service_safe_state
+    mode: single
+    then:
+      # A restarted valve guard can otherwise restore the pre-service pump
+      # target after its delay. Cancel it before establishing the safe state.
+      - script.stop: valve_travel_guard
+      - lambda: |-
+          id(valve_motion_until) = 0;
+          id(valve_stop_window) = false;
+      - lambda: 'id(pentair_pump).set_run(false);'
+      - switch.turn_off: relay_booster
+      - switch.turn_off: relay_blower
+      - number.set:
+          id: chlorine_output
+          value: 0
+
+  # Arm the clean-filter baseline capture. Shared by the "Mark Filter Clean"
+  # button and by Backwash / Rinse, so the two can never drift apart. Arming is
+  # idempotent and cheap: it records nothing, it only restarts the settle window
+  # and lets the 10s tick take the reading once the equipment is genuinely back
+  # in the reference state.
+  - id: arm_filter_baseline
+    mode: single
+    then:
+      - lambda: |-
+          id(filter_baseline_armed) = true;
+          id(filter_settle_n) = 0;
+          id(filter_settle_rpm) = -1.0f;
+          ESP_LOGI("filter", "Baseline armed: will capture once running steady "
+                             "on skimmer suction + pool-jet return");
+
+  - id: pump_run_flow
+    parameters:
+      flow: float
+    # restart, not single: this is a "last write wins" setpoint apply. Under
+    # single, the 3s delay below swallowed every execute that arrived during
+    # it, so dragging the flow slider dropped all but the first step and the
+    # value you released on never reached the pump.
+    mode: restart
+    then:
+      - lambda: |-
+          id(pump_desired_flow) = flow;
+          id(pump_desired_rpm) = 0.0f;    // no rpm target while in flow mode
+          id(pump_speed_mode) = false;
+      - switch.turn_on: relay_pump_power
+      - delay: 3s
+      # The IntelliFlo3 runs its own firmware prime on a cold start, so we just
+      # power the pump and command the target flow; the drive handles priming.
+      - lambda: |-
+          // A fountain-valve window wants ZERO flow, not reduced flow, and the
+          // scene path writes the valves before the setpoint — so this command
+          // routinely lands mid-travel. Hold the drive stopped; the guard's
+          // restore leg re-commands pump_desired_flow once the valve is home.
+          if (id(pool_ctrl).travel_stop_active(id(valve_stop_window), millis(),
+                                               id(valve_motion_until))) {
+            ESP_LOGI("pump", "Flow %.1f gpm deferred: fountain valve travelling", flow);
+            id(pentair_pump).set_run(false);
+            return;
+          }
+          // Clamp to the valve-travel creep via the host-tested core
+          // (pump_interlock.h); the guard restores the target once the motion
+          // window expires.
+          float eff = id(pool_ctrl).effective_pump_flow(
+              flow, id(valve_change_flow).state, millis(), id(valve_motion_until));
+          int cmd = id(pool_ctrl).flow_to_cmd(eff);
+          ESP_LOGI("pump", "Flow %.1f gpm (eff %.1f) -> cmd %d", flow, eff, cmd);
+          id(pentair_pump).set_mode(esphome::pentair::PUMP_MODE_FLOW);
+          id(pentair_pump).set_target(cmd);
+          id(pentair_pump).set_run(true);
+
+  # Set pump SPEED (rpm) with the same comms interlock as pump_run_flow. This is
+  # the low-power escape hatch: the IntelliFlo's FLOW mode will not accept a
+  # setpoint under 20 GPM (firmware floor, clamped in protocol.h), and on this
+  # system 20 GPM costs ~1790 rpm / ~310 W. Speed mode accepts 450-3450 rpm, and
+  # pump power goes as rpm^3, so dropping below the flow-mode floor is where the
+  # electricity actually is.
+  #
+  # Deliberately NOT a general replacement for pump_run_flow: every other scene
+  # has a hydraulic job specified in GPM (spillway sheet, booster feed rate,
+  # fountain height, filter max), and closed-loop flow mode holds those against a
+  # loading filter. Only the idle holding scene — whose only requirement is
+  # "enough flow to keep the salt cell's flow switch closed" — uses rpm.
+  - id: pump_run_rpm
+    parameters:
+      rpm: float
+    # restart for the same reason as pump_run_flow: last write wins, so dragging
+    # the rpm slider doesn't drop every step that lands inside the 3s delay.
+    mode: restart
+    then:
+      - lambda: |-
+          id(pump_desired_flow) = 0.0f;   // no GPM target while in speed mode
+          id(pump_desired_rpm) = rpm;
+          id(pump_speed_mode) = true;
+      - switch.turn_on: relay_pump_power
+      - delay: 3s
+      - lambda: |-
+          // No valve-creep clamp here: see the note on valve_travel_guard. The
+          // rpm path only ever runs the idle holding scene, which is already
+          // below the creep flow. A fountain STOP window still applies though —
+          // leaving fountains for idle holding moves valve4 on the way out.
+          if (id(pool_ctrl).travel_stop_active(id(valve_stop_window), millis(),
+                                               id(valve_motion_until))) {
+            ESP_LOGI("pump", "Speed %.0f rpm deferred: fountain valve travelling", rpm);
+            id(pentair_pump).set_run(false);
+            return;
+          }
+          int cmd = id(pool_ctrl).rpm_to_cmd(rpm);
+          ESP_LOGI("pump", "Speed %.0f rpm -> cmd %d", rpm, cmd);
+          id(pentair_pump).set_mode(esphome::pentair::PUMP_MODE_SPEED);
+          id(pentair_pump).set_target(cmd);
+          id(pentair_pump).set_run(true);
+
+  # Re-assert the steady-state pump target in whichever unit currently owns it.
+  # One place that knows the flow/speed split, so callers (the valve-travel
+  # restore) don't each have to branch on pump_speed_mode.
+  #
+  # The speed leg deliberately RE-RESOLVES the holding rpm rather than replaying
+  # pump_desired_rpm: valve2 may have just rotated between skimmer and main
+  # drain, which are different hydraulic paths (see holding_pattern.h). Since
+  # the rotation moves valve2 -> valve_travel_guard -> here, the setpoint
+  # re-sizes itself on every suction change for free.
+  - id: pump_restore
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(pump_speed_mode);'
+          then:
+            - script.execute: holding_rpm_apply
+          else:
+            - script.execute:
+                id: pump_run_flow
+                flow: !lambda 'return id(pump_desired_flow);'
+
+  # Command the holding speed setpoint for the suction path valve2 is on RIGHT
+  # NOW. Speed mode is open-loop, so the skimmer and main-drain paths make
+  # different flow at the same rpm; the pure core owns the selection.
+  - id: holding_rpm_apply
+    mode: single
+    then:
+      - script.execute:
+          id: pump_run_rpm
+          rpm: !lambda |-
+            return id(pool_ctrl).holding_rpm_for_suction(
+                id(holding_rpm).state, id(holding_rpm_drain).state,
+                id(relay_valve2).state);
+
+  # Intelligent cleaning cycle (runs at clean_hour_am / clean_hour_pm).
+  # Phases: 1) filter the spa  2) spillover-refresh the spa with pool water
+  # (skimmer)  3) scrub the pool floor with the Polaris on main-drain suction
+  # 4) hand back to the base mode (holding pattern).
+  # Sets valves inline (NOT via scene_* scripts) so it never overwrites the
+  # user's selected base mode. Only starts if the component allows it; a freeze
+  # mid-cycle forces circulation and suppresses the booster + revert.
+  #
+  # This is a tick-driven state machine, NOT a chain of blocking `delay:`s: the
+  # start script just stamps clean_start_ms and clean_tick (1 s interval) asks
+  # the host-tested core (cleaning_phase.h) which phase the elapsed time maps
+  # to, actuating only on phase transitions. Phase boundaries + the booster
+  # prime-window are therefore unit-tested rather than living in delay chains.
+  - id: cleaning_cycle
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(pool_ctrl).may_clean();'
+          then:
+            - lambda: |-
+                id(pool_ctrl).set_cleaning_active(true);
+                id(clean_start_ms) = millis();
+                id(clean_phase_applied) = 0;   // force phase-1 plumbing next tick
+            - logger.log: "Cleaning cycle started"
+            - script.execute: clean_tick        # apply phase 1 now, don't wait 1 s
+          else:
+            # Scheduler wanted to clean but may_clean() said no. Surface WHY via
+            # the typed event (service > freeze > active scene) so a skipped
+            # twice-daily clean can't pass silently.
+            - lambda: |-
+                char reason[40];
+                if (id(pool_ctrl).service_active())
+                  snprintf(reason, sizeof(reason), "service mode");
+                else if (id(pool_ctrl).freeze_active())
+                  snprintf(reason, sizeof(reason), "freeze active");
+                else
+                  snprintf(reason, sizeof(reason), "%s scene active", id(pool_ctrl).base_mode_name());
+                // Typed event for HA automations (see entities.yaml cleaning_event).
+                if (id(pool_ctrl).service_active())     id(cleaning_event).trigger("skipped_service");
+                else if (id(pool_ctrl).freeze_active()) id(cleaning_event).trigger("skipped_freeze");
+                else                                    id(cleaning_event).trigger("skipped_scene");
+                ESP_LOGW("clean", "Scheduled cleaning skipped: %s", reason);
+
+  # One cleaning tick: decide the phase from elapsed time, then actuate on
+  # transitions. No-op while the cycle isn't running (clean_start_ms == 0).
+  - id: clean_tick
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(clean_start_ms) != 0;'
+          then:
+            # Decision: pure deadline math in the core. scrub_ms folds in the
+            # 60 s prime window so the booster still runs for clean_scrub_min
+            # AFTER flow is established, matching the original choreography.
+            - lambda: |-
+                uint32_t elapsed = millis() - id(clean_start_ms);
+                auto t = id(pool_ctrl).cleaning_tick(
+                    elapsed,
+                    (uint32_t) (id(clean_spa_min).state       * 60000.0f),
+                    (uint32_t) (id(clean_spillover_min).state * 60000.0f),
+                    (uint32_t) (id(clean_scrub_min).state     * 60000.0f) + 60000u,
+                    60000u,
+                    id(pool_ctrl).freeze_active());
+                id(clean_phase_now)   = t.phase;
+                id(clean_booster_now) = t.booster_permit;
+
+            # --- Phase plumbing: on any transition into a run phase (1-4),
+            # apply that phase's ABSOLUTE diverter/flow pattern from the
+            # host-tested table (cleaning_phase.h::cleaning_plumbing). Edge-
+            # triggered on clean_phase_applied, and relays only move when the
+            # pattern actually differs, so re-applying a settled phase is a
+            # no-op. Replaces the four hand-coded per-phase valve blocks with
+            # one tested source of truth.
+            - if:
+                condition:
+                  lambda: |-
+                    return id(clean_phase_now) >= 1 && id(clean_phase_now) <= 3 &&
+                           id(clean_phase_applied) != id(clean_phase_now) &&
+                           !id(pool_ctrl).freeze_active();
+                then:
+                  - lambda: |-
+                      static const char *const names[] = {
+                          "", "1/3: spa filter", "2/3: spillover refresh",
+                          "3/3: pool scrub (cleaner)"};
+                      ESP_LOGI("clean", "Clean %s", names[id(clean_phase_now)]);
+                      // Booster runs only mid-scrub (phase 3); cut it on entry to
+                      // any other phase (notably the scrub -> done handoff).
+                      if (id(clean_phase_now) != 3 && id(relay_booster).state)
+                        id(relay_booster).turn_off();
+                  - script.execute: apply_plumbing_now
+                  - lambda: 'id(clean_phase_applied) = id(clean_phase_now);'
+
+            # --- Done: hand back to the base mode / holding pattern ---
+            - if:
+                condition:
+                  lambda: 'return id(clean_phase_now) == 4;'
+                then:
+                  - switch.turn_off: relay_booster
+                  - lambda: |-
+                      id(pool_ctrl).set_cleaning_active(false);
+                      id(clean_start_ms) = 0;
+                      id(clean_phase_applied) = 0;
+                      id(cleaning_event).trigger("completed");
+                  - if:
+                      condition:
+                        lambda: 'return !id(pool_ctrl).freeze_active();'
+                      then:
+                        - script.execute: apply_base_mode
+
+            # --- Booster (Polaris): level-driven, only meaningful mid-scrub.
+            # The core permits it after the prime window, but we ALSO require
+            # the pump to be genuinely running before energising it -- the same
+            # mechanical interlock the supervisor enforces (booster_permit =
+            # pump_running && !priming && !alarm). NOTE: the pump reports
+            # running() during its prime spin-up too, so we explicitly exclude
+            # priming/alarm here so the booster is never started before flow is
+            # actually established. Gating the turn-on here (rather than leaning
+            # on the supervisor's reactive cut) means no on -> cut -> on chatter.
+            - if:
+                condition:
+                  lambda: 'return id(clean_booster_now) && !id(relay_booster).state && id(pump_running).state && !id(pump_priming).state && !id(pump_alarm).state;'
+                then:
+                  - switch.turn_on: relay_booster     # Polaris on (pump running, flow established)
+            - if:
+                condition:
+                  lambda: 'return !id(clean_booster_now) && id(clean_phase_now) == 3 && id(relay_booster).state;'
+                then:
+                  - switch.turn_off: relay_booster
+
+  # --- Valve scenes -------------------------------------------------
+  # JVA convention (verify against your actuators; if a diverter is
+  # reversed, flip the dial on the actuator or invert that relay):
+  #   relay_valve1  OFF=Pool suction   ON=Spa suction
+  #   relay_valve2  OFF=Skimmers       ON=Main drain   (pool suction sub-select)
+  #   relay_valve3  OFF=Pool return    ON=Spa return
+  #   relay_valve4  OFF=Jets           ON=Fountains    (pool return sub-select)
+  #
+  # Single plumbing actuator (the imperative shell's one hand on the valves).
+  # Asks the host-tested arbiter (plumbing_arbiter.h::resolve_plumbing) WHO owns
+  # the plumbing right now and WHAT pattern to apply, then drives the four
+  # diverters, the blower, and the pump flow to match. Every actuation path --
+  # the freeze interval, the cleaning tick, and scene presses -- funnels through
+  # here, so ownership priority (service > freeze > cleaning > scene) is settled
+  # in ONE tested place instead of three scripts racing to write the valves:
+  #   SERVICE  -> actuate=false: hands off, nothing moves.
+  #   FREEZE   -> forced circulation flow + rotation targets.
+  #   CLEANING -> the current phase's pattern + clean flow.
+  #   SCENE    -> the selected base mode's pattern + scene flow.
+  # Each valve relay that actually moves fires valve_travel_guard, so the pump
+  # dip during actuator travel is enforced no matter what triggered the move;
+  # re-applying a settled pattern moves no relay and needs no dip.
+  - id: apply_plumbing_now
+    mode: restart
+    then:
+      - lambda: |-
+          auto now = id(sntp_time).now();
+          int sod = now.is_valid() ? now.hour * 3600 + now.minute * 60 + now.second : 0;
+          int rot = (int) lroundf(id(freeze_rotate_min).state * 60.0f);
+          auto r = id(pool_ctrl).resolve_plumbing(
+              id(pool_ctrl).base_mode(), id(pool_ctrl).service_active(),
+              id(pool_ctrl).freeze_active(), id(pool_ctrl).cleaning_active(),
+              id(clean_phase_now), sod, rot, id(normal_flow).state);
+          if (!r.actuate) return;   // SERVICE: technician owns the equipment.
+
+          // Blower (spa air) -- owned by the resolved pattern.
+          if (r.blower) id(relay_blower).turn_on(); else id(relay_blower).turn_off();
+
+          // Diverters. Each relay that actually changes fires valve_travel_guard
+          // (pump dip + restore); re-applying a settled pattern moves nothing.
+          if (r.valve1_spa)      id(relay_valve1).turn_on(); else id(relay_valve1).turn_off();
+          // valve2 (suction drain): in idle POOL/AUTO, follow the holding-drain
+          // schedule directly so a scene (re)apply lands on the CURRENT suction
+          // source instead of forcing skimmer and letting the 60s holding
+          // interval flip it back to the drain a moment later (the visible
+          // "skimmer -> main drain" blink). Freeze/cleaning keep r.valve2_drain.
+          bool v2_drain = r.valve2_drain;
+          if (id(pool_ctrl).effective_is_pool_idle() && now.is_valid()) {
+            int period_s = (int) lroundf(id(holding_drain_period_h).state * 3600.0f);
+            int drain_s  = (int) lroundf(id(holding_drain_min).state * 60.0f);
+            v2_drain = id(pool_ctrl).holding_drain_now(sod, period_s, drain_s);
+          }
+          if (v2_drain)          id(relay_valve2).turn_on(); else id(relay_valve2).turn_off();
+          if (r.valve3_spa)      id(relay_valve3).turn_on(); else id(relay_valve3).turn_off();
+          if (r.valve4_fountain) id(relay_valve4).turn_on(); else id(relay_valve4).turn_off();
+
+          // Idle HOLDING may run in the pump's SPEED (rpm) mode instead, to get
+          // below the 20 GPM flow-mode floor (see pump_run_rpm). Only the
+          // HOLDING selector qualifies, and never under freeze: freeze commands
+          // a forced GPM because its job is a guaranteed flow rate, not a
+          // guaranteed shaft speed.
+          if (!r.forced_flow && (int) r.flow == 0 && id(holding_rpm_mode).state) {
+            id(holding_rpm_apply)->execute();
+            return;
+          }
+
+          // Flow. Freeze commands a forced GPM directly; scene/cleaning map the
+          // pure FlowSel selector to the live GPM number entity (the numbers
+          // can't live in the framework-free core). Only place FlowSel -> gpm.
+          float flow;
+          if (r.forced_flow) {
+            flow = r.forced_gpm;
+          } else {
+            switch ((int) r.flow) {
+              case 0:  flow = id(holding_flow).state;       break;  // HOLDING
+              case 2:  flow = id(bubbles_flow).state;       break;  // BUBBLES
+              case 3:  flow = id(fountain_low_flow).state;  break;  // FOUNTAIN_LOW
+              case 4:  flow = id(fountain_high_flow).state; break;  // FOUNTAIN_HIGH
+              case 5:  flow = id(clean_flow).state;         break;  // CLEAN
+              case 6:  flow = id(booster_flow).state;       break;  // BOOSTER
+              default: flow = id(normal_flow).state;        break;  // NORMAL
+            }
+          }
+          id(pump_run_flow)->execute(flow);
+      # Push the arbitrated mode name to HA immediately so the dashboard's mode
+      # chip + scene-button highlights react on the press instead of lagging up
+      # to the 10s Pool Mode text-sensor poll (kept only as a backstop).
+      - lambda: 'id(pool_mode_text).update();'
+
+  # Apply a user base scene from the host-tested plumbing truth table
+  # (plumbing.h): record the base mode (persists + drives cleaning/freeze
+  # arbitration), then hand off to apply_plumbing_now, which resolves the base
+  # mode to the SCENE owner and drives the diverters, blower, and flow. The six
+  # scene_* scripts below are thin wrappers over this, so scene routing lives in
+  # ONE tested place instead of being duplicated (and drifting) across six
+  # scripts.
+  #
+  # Arbitration (plumbing_arbiter.h resolve_plumbing) decides how a scene press
+  # is handled by who currently owns the plumbing:
+  #   FREEZE   -> REJECT the scene outright (safety owns the equipment; the base
+  #               mode is left unchanged, so freeze release restores the prior
+  #               scene).
+  #   CLEANING -> CANCEL the rest of the cycle and let the scene take over now.
+  #   SERVICE  -> apply (manual control).
+  #   SCENE    -> apply (normal case).
+  - id: apply_scene
+    parameters:
+      mode: int
+    mode: restart
+    then:
+      - lambda: |-
+          auto now = id(sntp_time).now();
+          int sod = now.is_valid() ? now.hour * 3600 + now.minute * 60 + now.second : 0;
+          int rot = (int) lroundf(id(freeze_rotate_min).state * 60.0f);
+          auto r = id(pool_ctrl).resolve_plumbing(
+              mode, id(pool_ctrl).service_active(), id(pool_ctrl).freeze_active(),
+              id(pool_ctrl).cleaning_active(), id(clean_phase_now),
+              sod, rot, id(normal_flow).state);
+          int owner = (int) r.owner;   // 0=SERVICE 1=FREEZE 2=CLEANING 3=SCENE
+
+          if (owner == 1) {            // FREEZE: reject the scene entirely.
+            ESP_LOGW("scene", "Scene %d rejected: freeze protection owns the plumbing", mode);
+            id(scene_apply_now) = false;
+            return;
+          }
+          if (owner == 2) {            // CLEANING: cancel the cycle, scene takes over.
+            ESP_LOGI("scene", "Scene %d cancels the cleaning cycle", mode);
+            id(pool_ctrl).set_cleaning_active(false);
+            id(clean_start_ms) = 0;
+            id(clean_phase_applied) = 0;
+            id(clean_phase_now) = 0;
+            id(relay_booster).turn_off();   // drop the Polaris with the cycle
+            id(cleaning_event).trigger("cancelled_by_scene");
+          }
+          // SERVICE / SCENE / just-cancelled CLEANING: record the base mode and
+          // hand off to the single actuator, which re-resolves this now-current
+          // base mode to the SCENE owner and applies its valves + blower + flow.
+          id(pool_ctrl).set_base_mode(mode);
+          id(scene_apply_now) = true;
+      - if:
+          condition:
+            lambda: 'return id(scene_apply_now);'
+          then:
+            - script.execute: apply_plumbing_now
+
+  # "Pool" is the idle holding pattern: low holding_flow, skimmer suction to
+  # start; the holding-pattern interval then rotates suction to the drain. It is
+  # a STATIC hold -- the scheduled cleaning rotation does NOT run in Pool.
+  - id: scene_pool
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 6}
+
+  # "Auto" is the automatic program and the DEFAULT base mode (value 0):
+  # identical idle-pool hydraulics to Pool, but it ALSO permits the scheduled
+  # cleaning rotation (may_clean gates on AUTO). Between cleaning cycles it
+  # behaves exactly like Pool.
+  - id: scene_auto
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 0}
+
+  - id: scene_spa
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 1}
+
+  # Spa with the air blower on and a livelier pump flow.
+  - id: scene_spa_bubbles
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 5}
+
+  - id: scene_spillover
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 2}
+
+  - id: scene_fountains_low
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 3}
+
+  - id: scene_fountains_high
+    mode: restart
+    then:
+      - script.execute: {id: apply_scene, mode: 4}
+
+  # Re-apply the user's selected base scene (used when freeze or a cleaning
+  # cycle releases). Dispatches on the component's persisted base mode straight
+  # through apply_scene, which pulls the diverter pattern from the truth table.
+  - id: apply_base_mode
+    mode: restart
+    then:
+      - script.execute:
+          id: apply_scene
+          mode: !lambda 'return id(pool_ctrl).base_mode();'
+      - globals.set:
+          id: booted
+          value: 'true'
