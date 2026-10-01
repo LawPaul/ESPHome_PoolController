@@ -6,6 +6,8 @@
 #include <cstdio>
 
 using esphome::pool_control::comms_lost;
+using esphome::pool_control::comms_lost_latched;
+using esphome::pool_control::StalenessLatch;
 
 int main() {
   const uint32_t grace = 90000;    // 90 s after power-on
@@ -33,6 +35,14 @@ int main() {
     uint32_t now = seen + timeout;  // == timeout
     assert(!comms_lost(now, /*powered*/1, seen, grace, timeout));
     assert(comms_lost(now + 1, /*powered*/1, seen, grace, timeout));  // one past
+  }
+
+  // A new sample, not clock rollover, clears stale state.
+  {
+    StalenessLatch latch;
+    assert(comms_lost_latched(latch, 300000, 1, 100000, grace, timeout));
+    assert(comms_lost_latched(latch, 1000, 1, 100000, grace, timeout));
+    assert(!comms_lost_latched(latch, 2000, 1, 2000, grace, timeout));
   }
 
   std::printf("comms_watchdog: all tests passed\n");

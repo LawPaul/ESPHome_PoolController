@@ -260,7 +260,7 @@ interval:
           }
           if (limit == 0) return;
           if (id(wifi_down_since) == 0) {
-            id(wifi_down_since) = millis();
+            id(wifi_down_since) = id(pool_ctrl).nonzero_timestamp_ms(millis());
             ESP_LOGW("wifi", "Link down; will reboot if it stays down %.0f min",
                      id(wifi_recover_min).state);
             return;
@@ -490,7 +490,8 @@ interval:
           // un-pinned ROM address) means we cannot prove it is warm. Rather than
           // skip the tick and risk a burst pipe, protect anyway — force
           // circulation + loop rotation — and let the sensor-fault alarm say why.
-          bool failed = id(pool_ctrl).temp_sensor_stale(millis(), id(outdoor_temp_seen), 300000);
+          bool failed = id(pool_ctrl).outdoor_temp_stale(
+              millis(), id(outdoor_temp_seen), 300000);
           uint32_t felapsed = was ? (millis() - id(freeze_start_ms)) : 0;
           uint32_t minrt = (uint32_t) (id(freeze_min_runtime_min).state * 60000.0f);
           auto d = failed
@@ -503,7 +504,8 @@ interval:
             ESP_LOGW("freeze", "Outdoor probe unreadable -> FAIL-SAFE freeze circulation");
           if (d.entered) {
             id(pool_ctrl).set_freeze(true);
-            id(freeze_start_ms) = millis();   // start the minimum run-on clock
+            id(freeze_start_ms) =
+                id(pool_ctrl).nonzero_timestamp_ms(millis());
             id(relay_booster).turn_off();   // protect the Polaris during freeze
             // Freeze is a hard override: cancel any in-progress cleaning cycle
             // outright (freeze > cleaning) and run pure freeze protection. The
@@ -560,7 +562,8 @@ script:
     mode: restart
     then:
       - lambda: |-
-          id(valve_motion_until) = millis() + (uint32_t) (id(valve_delay_s).state * 1000.0f);
+          id(valve_motion_until) = id(pool_ctrl).nonzero_timestamp_ms(
+              millis() + (uint32_t) (id(valve_delay_s).state * 1000.0f));
           auto action = id(pool_ctrl).valve_travel_action(
               id(valve_stop_window), id(relay_pump_power).state, id(pump_speed_mode),
               id(pump_desired_flow), id(valve_change_flow).state, id(valve_delay_s).state);
@@ -758,6 +761,23 @@ script:
           id: chlorine_output
           value: 0
 
+  # Keep the delayed exit independent from repeated switch commands.
+  - id: service_exit
+    mode: single
+    then:
+      # Restore actuator power and wait for possible travel before automation.
+      - switch.turn_on: relay_valve_power
+      - delay: !lambda |-
+          return id(pool_ctrl).remaining_motion_ms(
+              millis(), id(valve_motion_until));
+      - lambda: 'id(pool_ctrl).set_service(false);'
+      - logger.log: "Service mode OFF: resuming automatic operation"
+      # The booster is cleaning-owned and must not survive service mode.
+      - switch.turn_off: relay_booster
+      - script.execute: apply_base_mode
+      - script.execute: supervisor_apply
+      - script.execute: chlorine_apply
+
   # Arm the clean-filter baseline capture. Shared by the "Mark Filter Clean"
   # button and by Backwash / Rinse, so the two can never drift apart. Arming is
   # idempotent and cheap: it records nothing, it only restarts the settle window
@@ -911,7 +931,8 @@ script:
           then:
             - lambda: |-
                 id(pool_ctrl).set_cleaning_active(true);
-                id(clean_start_ms) = millis();
+                id(clean_start_ms) =
+                    id(pool_ctrl).nonzero_timestamp_ms(millis());
                 id(clean_phase_applied) = 0;   // force phase-1 plumbing next tick
             - logger.log: "Cleaning cycle started"
             - script.execute: clean_tick        # apply phase 1 now, don't wait 1 s

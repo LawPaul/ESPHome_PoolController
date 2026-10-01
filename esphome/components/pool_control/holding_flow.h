@@ -107,6 +107,13 @@ class HoldingFlowController {
   // window does not straddle a change. Returns what to command, if anything.
   Out tick(uint32_t now_ms, bool pool_idle, bool pump_running, float target_flow,
            float flow_avg, float rpm_now, bool no_flow, uint16_t steady_count) {
+    // Expire before millis() can wrap an old bucket into the current window.
+    if (trip_window_start_ != 0 &&
+        (now_ms - trip_window_start_) >= trip_window_ms) {
+      trip_window_start_ = 0;
+      trips_ = 0;
+    }
+
     // --- Not our business ----------------------------------------------
     // Cleaning, spa, freeze and service own the pump; and at or above the
     // drive's floor, flow mode is strictly better than anything we can do, so

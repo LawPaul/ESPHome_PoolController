@@ -268,6 +268,22 @@ int main() {
     assert(o.phase == P::Establish);
     assert(c.trips() == 0);
   }
+  // Expire an old trip bucket during normal ticks.
+  {
+    uint32_t t = 1000;
+    auto c = settled_at(1300, t);
+    t += 1000;
+    c.tick(t, true, true, 15.5f, 2.0f, 1300, true, 20);
+    t += 6000;
+    auto o = c.tick(t, true, true, 15.5f, 2.0f, 1300, true, 20);
+    assert(o.phase == P::Bump);
+    assert(c.trips() == 1);
+    t += 1000;
+    c.tick(t, true, true, 15.5f, 16.0f, 1430, false, 20);
+    t += c.trip_window_ms;
+    c.tick(t, true, true, 15.5f, 16.0f, 1430, false, 20);
+    assert(c.trips() == 0);
+  }
 
   // --- Handing the pump back ------------------------------------------
   // Cleaning starts mid-hold: stand down, then re-establish on return rather

@@ -7,6 +7,8 @@
 
 using esphome::pool_control::effective_pump_flow;
 using esphome::pool_control::flow_to_cmd;
+using esphome::pool_control::nonzero_timestamp_ms;
+using esphome::pool_control::remaining_delay_ms;
 using esphome::pool_control::rpm_to_cmd;
 using esphome::pool_control::RPM_CMD_MAX;
 using esphome::pool_control::RPM_CMD_MIN;
@@ -17,6 +19,20 @@ using esphome::pool_control::valve_travel_action;
 int main() {
   const float creep = 29.0f;
   const float desired = 44.0f;
+
+  {
+    assert(nonzero_timestamp_ms(123) == 123);
+    assert(nonzero_timestamp_ms(0) == 1);
+  }
+
+  {
+    assert(remaining_delay_ms(/*now*/100, /*deadline*/200) == 100);
+    assert(remaining_delay_ms(/*now*/200, /*deadline*/200) == 0);
+    assert(remaining_delay_ms(/*now*/300, /*deadline*/200) == 0);
+    assert(remaining_delay_ms(/*now*/0x80000001U, /*deadline*/0) == 0);
+    assert(remaining_delay_ms(/*now*/0xFFFFFFF0U, /*deadline*/0x00000010U) == 32);
+    assert(remaining_delay_ms(/*now*/0x00000010U, /*deadline*/0x00000010U) == 0);
+  }
 
   // --- effective_pump_flow: valve-travel clamp ---
   {
@@ -32,6 +48,8 @@ int main() {
     assert(effective_pump_flow(18.0f, creep, /*now*/100, /*until*/200) == 18.0f);
     // Request equal to creep inside window -> unchanged (not > creep).
     assert(effective_pump_flow(creep, creep, /*now*/100, /*until*/200) == creep);
+    assert(effective_pump_flow(desired, creep, /*now*/0xFFFFFFF0U,
+                               /*until*/0x00000010U) == creep);
   }
 
   // --- flow_to_cmd: native GPM -> single-byte encoding (identity) ---
@@ -115,6 +133,8 @@ int main() {
     assert(!travel_stop_active(false, /*now*/100, /*until*/200));
     // No window open at all.
     assert(!travel_stop_active(true, /*now*/0, /*until*/0));
+    assert(travel_stop_active(true, /*now*/0xFFFFFFF0U,
+                              /*until*/0x00000010U));
   }
 
   std::printf("pump_interlock: all tests passed\n");

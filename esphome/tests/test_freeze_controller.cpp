@@ -1,6 +1,7 @@
 // Host unit tests for the freeze-protection decision.
 // Build & run:  c++ -std=c++17 -Wall esphome/tests/test_freeze_controller.cpp -o /tmp/fztest && /tmp/fztest
 #include "../components/pool_control/freeze_controller.h"
+#include "../components/pool_control/comms_watchdog.h"
 
 #include <cassert>
 #include <cstdio>
@@ -99,6 +100,11 @@ int main() {
     assert(temp_sensor_stale(300000, 0, win));                   // never-seen probe trips
     assert(!temp_sensor_stale(1000000, 800000, win));            // fresh (200s ago)
     assert(temp_sensor_stale(1000000, 600000, win));             // 400s ago -> stale
+
+    esphome::pool_control::StalenessLatch latch;
+    assert(latch.update(600000, temp_sensor_stale(1000000, 600000, win)));
+    assert(latch.update(600000, temp_sensor_stale(1000, 600000, win)));
+    assert(!latch.update(1000, temp_sensor_stale(1000, 1000, win)));
   }
 
   // --- freeze_failsafe: always protects, mirrors a real freeze tick ---

@@ -23,7 +23,8 @@ switch:
     # Timestamp power-on so the RS485 watchdog only expects pump telemetry
     # while the pump is actually energised (comms need the relay on).
     on_turn_on:
-      - lambda: 'id(pump_pwr_since) = millis();'
+      - lambda: |-
+          id(pump_pwr_since) = id(pool_ctrl).nonzero_timestamp_ms(millis());
     on_turn_off:
       - lambda: 'id(pump_pwr_since) = 0;'
 
@@ -45,8 +46,8 @@ switch:
       # Re-energising a manually displaced actuator starts motion without a
       # direction-relay edge, so explicitly open the same travel window.
       - lambda: |-
-          id(valve_motion_until) = millis() +
-              (uint32_t) (id(valve_delay_s).state * 1000.0f);
+          id(valve_motion_until) = id(pool_ctrl).nonzero_timestamp_ms(
+              millis() + (uint32_t) (id(valve_delay_s).state * 1000.0f));
 
   # The salt cell (PC100/Plus60) is powered from the LOAD side of the pump's
   # G7L#1 power relay -- an OEM-style hardware interlock. There is no separate
@@ -153,8 +154,10 @@ switch:
     name: "Service Mode"
     id: service_mode
     icon: "mdi:wrench-clock"
-    optimistic: true
+    # Exit remains active while actuator power is restored.
+    lambda: "return id(pool_ctrl).service_active();"
     turn_on_action:
+      - script.stop: service_exit
       - lambda: 'id(pool_ctrl).set_service(true);'
       - logger.log:
           level: WARN
@@ -164,28 +167,7 @@ switch:
       # was already running still running.
       - script.execute: service_safe_state
     turn_off_action:
-      # Restore actuator power before releasing plumbing back to automation;
-      # an actuator moved by hand may travel as soon as power returns. Keep
-      # Service Mode active until that travel window ends, then apply_base_mode.
-      - switch.turn_on: relay_valve_power
-      - delay: !lambda |-
-          const int32_t remaining =
-              (int32_t) (id(valve_motion_until) - millis());
-          return remaining > 0 ? (uint32_t) remaining : 0U;
-      - lambda: 'id(pool_ctrl).set_service(false);'
-      - logger.log: "Service mode OFF: resuming automatic operation"
-      # Full restore to automatic operation. apply_base_mode re-resolves the
-      # plumbing (valves + blower + flow) for whoever owns it now and cancels any
-      # clean the service interrupted; but the booster is owned ONLY by the
-      # cleaning cycle, so a Polaris a tech left running would otherwise persist —
-      # drop it explicitly (a running cycle's clean_tick re-asserts it within 1s).
-      # Then kick the supervisor + chlorine loops so the cell re-energises and the
-      # IntelliChlor output setpoint re-asserts immediately instead of waiting for their
-      # 2 s / 15 min backstops.
-      - switch.turn_off: relay_booster
-      - script.execute: apply_base_mode
-      - script.execute: supervisor_apply
-      - script.execute: chlorine_apply
+      - script.execute: service_exit
 
   # NOTE: the "Chlorinator Relay" diagnostic switch has been removed. There is no
   # longer a dedicated cell relay -- the PC100 is fed from the LOAD side of the
@@ -476,7 +458,9 @@ sensor:
     # Stamp freshness ONLY on a valid reading so a NaN/dead probe goes stale and
     # freeze protection fails safe (see the freeze interval in logic.yaml).
     on_value:
-      - lambda: 'if (!isnan(x)) id(outdoor_temp_seen) = millis();'
+      - lambda: |-
+          if (!isnan(x))
+            id(outdoor_temp_seen) = id(pool_ctrl).nonzero_timestamp_ms(millis());
 
   # Pool water temperature — waterproof DS18B20 in the RETURN line (thermowell /
   # tee after the filter+cell, or strapped to the pipe under insulation). This is
@@ -493,7 +477,9 @@ sensor:
     # Stamp freshness ONLY on a valid reading so a dead/NaN probe goes stale and
     # the "Pool Temp Sensor Fault" diagnostic trips (mirrors the outdoor probe).
     on_value:
-      - lambda: 'if (!isnan(x)) id(water_temp_seen) = millis();'
+      - lambda: |-
+          if (!isnan(x))
+            id(water_temp_seen) = id(pool_ctrl).nonzero_timestamp_ms(millis());
 
   # Per-source water temperature: the single cell reading (water_temp) means a
   # different thing depending on which suction diverter is selected. These hold
@@ -532,7 +518,8 @@ sensor:
     name: "Pump Power"
     id: pump_power
     on_value:
-      - lambda: 'id(pump_rs485_seen) = millis();'
+      - lambda: |-
+          id(pump_rs485_seen) = id(pool_ctrl).nonzero_timestamp_ms(millis());
   - platform: pentair
     pump_id: pentair_pump
     type: rpm
@@ -587,7 +574,8 @@ sensor:
     # Salt is returned on every cell poll, so it is the reliable cell heartbeat
     # for the comms watchdog (the Plus60 may not report temp).
     on_value:
-      - lambda: 'id(cell_rs485_seen) = millis();'
+      - lambda: |-
+          id(cell_rs485_seen) = id(pool_ctrl).nonzero_timestamp_ms(millis());
 
   # --- Cell runtime meters ----------------------------------------------
   # Generating hours = wall-clock time the cell was actively producing.
@@ -881,8 +869,8 @@ binary_sensor:
     entity_category: diagnostic
     lambda: |-
       // Staleness decision lives in the host-tested core (comms_watchdog.h).
-      return id(pool_ctrl).comms_lost(millis(), id(pump_pwr_since),
-                                      id(pump_rs485_seen), 90000, 90000);
+      return id(pool_ctrl).pump_comms_lost(
+          millis(), id(pump_pwr_since), id(pump_rs485_seen), 90000, 90000);
     filters:
       - delayed_on: 10s
       - delayed_off: 10s
@@ -899,8 +887,8 @@ binary_sensor:
       // Cell power is now tied to the pump relay (OEM-style interlock), so the
       // cell is expected on the bus whenever the pump is energised -- gate the
       // staleness window on pump_pwr_since, not a dedicated cell-power stamp.
-      return id(pool_ctrl).comms_lost(millis(), id(pump_pwr_since),
-                                      id(cell_rs485_seen), 90000, 90000);
+      return id(pool_ctrl).cell_comms_lost(
+          millis(), id(pump_pwr_since), id(cell_rs485_seen), 90000, 90000);
     filters:
       - delayed_on: 10s
       - delayed_off: 10s
@@ -922,7 +910,8 @@ binary_sensor:
     entity_category: diagnostic
     lambda: |-
       // Staleness decision lives in the host-tested core (freeze_controller.h).
-      return id(pool_ctrl).temp_sensor_stale(millis(), id(outdoor_temp_seen), 300000);
+      return id(pool_ctrl).outdoor_temp_stale(
+          millis(), id(outdoor_temp_seen), 300000);
     filters:
       - delayed_on: 10s
       - delayed_off: 10s
@@ -941,7 +930,8 @@ binary_sensor:
     device_class: problem
     entity_category: diagnostic
     lambda: |-
-      return id(pool_ctrl).temp_sensor_stale(millis(), id(water_temp_seen), 300000);
+      return id(pool_ctrl).water_temp_stale(
+          millis(), id(water_temp_seen), 300000);
     filters:
       - delayed_on: 10s
       - delayed_off: 10s

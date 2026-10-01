@@ -129,6 +129,13 @@ class PoolControl : public Component {
     return esphome::pool_control::effective_pump_flow(desired, creep, now_ms,
                                                       motion_until_ms);
   }
+  uint32_t remaining_motion_ms(uint32_t now_ms,
+                               uint32_t motion_until_ms) const {
+    return esphome::pool_control::remaining_delay_ms(now_ms, motion_until_ms);
+  }
+  uint32_t nonzero_timestamp_ms(uint32_t timestamp_ms) const {
+    return esphome::pool_control::nonzero_timestamp_ms(timestamp_ms);
+  }
   // Creep dip, full stop, or leave alone for the move that just happened.
   TravelAction valve_travel_action(bool stop_valve, bool pump_powered, bool speed_mode,
                                    float desired_flow, float creep, float travel_s) const {
@@ -209,6 +216,34 @@ class PoolControl : public Component {
                   uint32_t timeout_ms) const {
     return esphome::pool_control::comms_lost(now_ms, powered_since_ms,
                                              last_seen_ms, grace_ms, timeout_ms);
+  }
+  bool pump_comms_lost(uint32_t now_ms, uint32_t powered_since_ms,
+                       uint32_t last_seen_ms, uint32_t grace_ms,
+                       uint32_t timeout_ms) {
+    return esphome::pool_control::comms_lost_latched(
+        pump_comms_latch_, now_ms, powered_since_ms, last_seen_ms, grace_ms,
+        timeout_ms);
+  }
+  bool cell_comms_lost(uint32_t now_ms, uint32_t powered_since_ms,
+                       uint32_t last_seen_ms, uint32_t grace_ms,
+                       uint32_t timeout_ms) {
+    return esphome::pool_control::comms_lost_latched(
+        cell_comms_latch_, now_ms, powered_since_ms, last_seen_ms, grace_ms,
+        timeout_ms);
+  }
+  bool outdoor_temp_stale(uint32_t now_ms, uint32_t last_seen_ms,
+                          uint32_t max_stale_ms) {
+    return outdoor_temp_latch_.update(
+        last_seen_ms,
+        esphome::pool_control::temp_sensor_stale(now_ms, last_seen_ms,
+                                                 max_stale_ms));
+  }
+  bool water_temp_stale(uint32_t now_ms, uint32_t last_seen_ms,
+                        uint32_t max_stale_ms) {
+    return water_temp_latch_.update(
+        last_seen_ms,
+        esphome::pool_control::temp_sensor_stale(now_ms, last_seen_ms,
+                                                 max_stale_ms));
   }
 
   // --- Pool chemistry ---
@@ -320,6 +355,10 @@ class PoolControl : public Component {
   bool boost_active_{false};
   DemandObserver demand_;
   HoldingFlowController hold_;
+  StalenessLatch pump_comms_latch_;
+  StalenessLatch cell_comms_latch_;
+  StalenessLatch outdoor_temp_latch_;
+  StalenessLatch water_temp_latch_;
   ModeManager modes_;
   ESPPreferenceObject mode_pref_;
   ESPPreferenceObject demand_pref_;

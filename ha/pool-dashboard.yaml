@@ -398,30 +398,41 @@ views:
                       {{ states('sensor.pool_controller_salt_level') | int(0) }}
                       ppm
                     icon_color: >-
-                      {% if
+                      {% set error =
                       is_state('binary_sensor.pool_controller_chlorinator_comms_lost',
                       'on') or is_state('binary_sensor.pool_controller_no_flow',
-                      'on') or
-                      is_state('binary_sensor.pool_controller_low_salt', 'on')
-                      or is_state('binary_sensor.pool_controller_very_low_salt',
+                      'on') or is_state('binary_sensor.pool_controller_very_low_salt',
                       'on') or
                       is_state('binary_sensor.pool_controller_inspect_cell',
                       'on') or
                       is_state('binary_sensor.pool_controller_cell_water_too_cold',
-                      'on') %}red{% else %}blue{% endif %}
-                    badge_color: red
+                      'on') %} {% if error %}red{% elif
+                      is_state('binary_sensor.pool_controller_low_salt', 'on')
+                      %}yellow{% else %}blue{% endif %}
+                    badge_color: >-
+                      {% set error =
+                      is_state('binary_sensor.pool_controller_chlorinator_comms_lost',
+                      'on') or is_state('binary_sensor.pool_controller_no_flow',
+                      'on') or is_state('binary_sensor.pool_controller_very_low_salt',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_inspect_cell',
+                      'on') or
+                      is_state('binary_sensor.pool_controller_cell_water_too_cold',
+                      'on') %} {% if error %}red{% elif
+                      is_state('binary_sensor.pool_controller_low_salt', 'on')
+                      %}yellow{% endif %}
                     badge_icon: >-
-                      {{ 'mdi:alert' if
+                      {% set error =
                       is_state('binary_sensor.pool_controller_chlorinator_comms_lost',
                       'on') or is_state('binary_sensor.pool_controller_no_flow',
-                      'on') or
-                      is_state('binary_sensor.pool_controller_low_salt', 'on')
-                      or is_state('binary_sensor.pool_controller_very_low_salt',
+                      'on') or is_state('binary_sensor.pool_controller_very_low_salt',
                       'on') or
                       is_state('binary_sensor.pool_controller_inspect_cell',
                       'on') or
                       is_state('binary_sensor.pool_controller_cell_water_too_cold',
-                      'on') else '' }}
+                      'on') %} {{ 'mdi:alert' if error or
+                      is_state('binary_sensor.pool_controller_low_salt', 'on')
+                      else '' }}
                     tap_action:
                       action: more-info
                   - type: custom:mushroom-template-card

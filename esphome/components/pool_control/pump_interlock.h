@@ -10,18 +10,28 @@ namespace pool_control {
 // the flow-interlock truth table are exercised by host unit tests; the YAML
 // lambdas only read sensor state and actuate (commandFlow / relay writes).
 
+// Preserve zero as the inactive/unseen timestamp sentinel.
+inline uint32_t nonzero_timestamp_ms(uint32_t timestamp_ms) {
+  return timestamp_ms == 0 ? 1u : timestamp_ms;
+}
+
+// Remaining time for a short deadline; zero means no deadline.
+inline uint32_t remaining_delay_ms(uint32_t now_ms, uint32_t deadline_ms) {
+  if (deadline_ms == 0)
+    return 0;
+  const int32_t remaining = static_cast<int32_t>(deadline_ms - now_ms);
+  return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
+}
+
 // Effective pump flow while a diverter may be travelling. Clamp DOWN to the low
 // valve-change creep until the motion window (millis deadline) expires, so a
 // flow command issued mid-travel can never spin the pump up against a transiting
 // valve (gear wear / pressure surge / momentary dead-head). Only ever reduces
 // flow — never raises a requested creep.
-//
-// Note: `now_ms` and `motion_until_ms` are raw millis(); the comparison shares
-// the same ~49-day wraparound behaviour as the caller's clock (acceptable: the
-// window is seconds long and self-clears).
 inline float effective_pump_flow(float desired_flow, float valve_creep_flow,
                                  uint32_t now_ms, uint32_t motion_until_ms) {
-  if (now_ms < motion_until_ms && desired_flow > valve_creep_flow)
+  if (remaining_delay_ms(now_ms, motion_until_ms) > 0 &&
+      desired_flow > valve_creep_flow)
     return valve_creep_flow;
   return desired_flow;
 }
@@ -60,10 +70,9 @@ inline TravelAction valve_travel_action(bool stop_valve, bool pump_powered,
 // the valves first and the setpoint second, so a flow/speed command routinely
 // lands mid-travel; this is what makes it hold the drive stopped rather than
 // spin the pump straight back up against the valve the guard just stopped for.
-// Shares effective_pump_flow's millis() wraparound note.
 inline bool travel_stop_active(bool stop_window, uint32_t now_ms,
                                uint32_t motion_until_ms) {
-  return stop_window && now_ms < motion_until_ms;
+  return stop_window && remaining_delay_ms(now_ms, motion_until_ms) > 0;
 }
 
 // Encode a flow setpoint as the Pentair single-byte flow command. The wire unit
